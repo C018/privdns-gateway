@@ -213,18 +213,16 @@ def _fetch_surge(url):
             kw.append(p[1])
     return dom, suf, kw
 
-def _srs_path(name):
-    return os.path.join(RS_DIR, name + ".json")
+def _fetch_bytes(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "pdg-bot"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
 
-def add_ruleset(url, target):
-    c = load()
-    if target not in exit_tags(c):
-        return False, f"出口 {target} 不存在; 可选: {', '.join(exit_tags(c))}"
+def _build_source(url, path):
+    """下载 Surge/Clash 文本 .list/.txt → 写 sing-box source rule_set, 返回域名条数。"""
     dom, suf, kw = _fetch_surge(url)
     if not (dom or suf or kw):
-        return False, "该 URL 没解析出域名规则(只支持 DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD)"
-    name = "rs_" + hashlib.sha1(url.encode()).hexdigest()[:8]
-    os.makedirs(RS_DIR, exist_ok=True)
+        raise ValueError("没解析出域名规则(仅支持 DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD)")
     rule = {}
     if dom:
         rule["domain"] = dom
@@ -232,33 +230,55 @@ def add_ruleset(url, target):
         rule["domain_suffix"] = suf
     if kw:
         rule["domain_keyword"] = kw
-    json.dump({"version": 1, "rules": [rule]}, open(_srs_path(name), "w"), ensure_ascii=False)
+    json.dump({"version": 1, "rules": [rule]}, open(path, "w"), ensure_ascii=False)
+    return len(dom) + len(suf) + len(kw)
+
+def add_ruleset(url, target):
+    c = load()
+    if target not in exit_tags(c):
+        return False, f"出口 {target} 不存在; 可选: {', '.join(exit_tags(c))}"
+    low = url.lower().split("?", 1)[0]
+    if low.endswith(".mrs"):
+        return False, ".mrs 是 mihomo 二进制格式, sing-box 不支持。请用 .list/.txt 文本规则, 或 sing-box .srs。"
+    name = "rs_" + hashlib.sha1(url.encode()).hexdigest()[:8]
+    os.makedirs(RS_DIR, exist_ok=True)
+    try:
+        if low.endswith(".srs"):
+            path = os.path.join(RS_DIR, name + ".srs"); fmt = "binary"
+            open(path, "wb").write(_fetch_bytes(url)); cnt = "sing-box .srs"
+        else:
+            path = os.path.join(RS_DIR, name + ".json"); fmt = "source"
+            cnt = f"{_build_source(url, path)} 条域名"
+    except Exception as e:  # noqa: BLE001
+        return False, f"下载/解析失败: {e}"
 
     def mod(cc):
         cc["route"].setdefault("rule_set", [])
         cc["route"]["rule_set"] = [r for r in cc["route"]["rule_set"] if r.get("tag") != name]
-        cc["route"]["rule_set"].append({"tag": name, "type": "local", "format": "source", "path": _srs_path(name)})
+        cc["route"]["rule_set"].append({"tag": name, "type": "local", "format": fmt, "path": path})
         cc["route"]["rules"] = [r for r in cc["route"]["rules"] if r.get("rule_set") != name]
         idx = 1 if cc["route"]["rules"] and cc["route"]["rules"][0].get("action") == "reject" else 0
         cc["route"]["rules"].insert(idx, {"rule_set": name, "outbound": target})
     ok, msg = apply_sb(mod)
     if ok:
-        m = _rs_meta(); m[name] = {"url": url, "outbound": target,
-                                   "count": len(dom) + len(suf) + len(kw)}; _save_rs_meta(m)
-        return True, f"规则集已添加 → {target}\n{len(dom)+len(suf)+len(kw)} 条域名 ({name})"
+        m = _rs_meta(); m[name] = {"url": url, "outbound": target, "format": fmt, "path": path}; _save_rs_meta(m)
+        return True, f"规则集已添加 → {target}（{cnt}，{name}）"
     return False, msg
 
 def del_ruleset(name):
+    m = _rs_meta(); path = m.get(name, {}).get("path")
     def mod(cc):
         cc["route"]["rule_set"] = [r for r in cc["route"].get("rule_set", []) if r.get("tag") != name]
         cc["route"]["rules"] = [r for r in cc["route"]["rules"] if r.get("rule_set") != name]
     ok, msg = apply_sb(mod)
     if ok:
-        m = _rs_meta(); m.pop(name, None); _save_rs_meta(m)
-        try:
-            os.remove(_srs_path(name))
-        except OSError:
-            pass
+        m.pop(name, None); _save_rs_meta(m)
+        for p in (path, os.path.join(RS_DIR, name + ".json"), os.path.join(RS_DIR, name + ".srs")):
+            try:
+                if p:
+                    os.remove(p)
+            except OSError:
+                pass
         return True, f"已删除规则集 {name}"
     return False, msg
 
@@ -266,15 +286,10 @@ def refresh_rulesets():
     m = _rs_meta(); n = 0
     for name, info in m.items():
         try:
-            dom, suf, kw = _fetch_surge(info["url"])
-            rule = {}
-            if dom:
-                rule["domain"] = dom
-            if suf:
-                rule["domain_suffix"] = suf
-            if kw:
-                rule["domain_keyword"] = kw
-            json.dump({"version": 1, "rules": [rule]}, open(_srs_path(name), "w"), ensure_ascii=False)
+            if info.get("format") == "binary":
+                open(info["path"], "wb").write(_fetch_bytes(info["url"]))
+            else:
+                _build_source(info["url"], info["path"])
             n += 1
         except Exception as e:  # noqa: BLE001
             print("refresh rs", name, e)
@@ -425,6 +440,33 @@ def handle_text(chat, text):
         state.pop(chat, None); send(chat, "已取消"); return
     if text in ("/start", "/menu", "/status"):
         state.pop(chat, None); send(chat, status_text()); return
+    if text.startswith("/"):
+        cmd = text.split()[0]
+        if cmd == "/exits":
+            send(chat, exits_text(), BACK); return
+        if cmd == "/rules":
+            send(chat, rules_text(), BACK); return
+        if cmd == "/addexit":
+            state[chat] = "add_exit"; send(chat, "发节点链接：<code>ss:// / vmess:// / trojan:// / vless://</code>。/cancel 取消。", BACK); return
+        if cmd == "/addrule":
+            state[chat] = "add_rule"; send(chat, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>。/cancel 取消。", BACK); return
+        if cmd == "/delrule":
+            state[chat] = "del_rule"; send(chat, "发要删除的域名。/cancel 取消。", BACK); return
+        if cmd == "/addrs":
+            state[chat] = "add_rs"; send(chat, "发「<b>规则集URL 出口</b>」（支持 .list / .srs）。/cancel 取消。", BACK); return
+        if cmd == "/delexit":
+            send(chat, "选择删除的出口：", kb_pick("delx", [o["tag"] for o in proxy_outbounds(load())])); return
+        if cmd == "/setfinal":
+            send(chat, "默认出口：", kb_pick("fin", exit_tags(load()))); return
+        if cmd == "/delrs":
+            m = _rs_meta()
+            send(chat, "选择删除的规则集：" if m else "无规则集", kb_pick("delrs", list(m.keys())) if m else BACK); return
+        if cmd == "/restart":
+            ok, _ = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"]); send(chat, "✅ 已重启" if ok else "重启失败"); return
+        if cmd == "/update":
+            send(chat, "更新中…"); r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
+            send(chat, f"✅ 完成，规则集刷新 {n} 个" if r.returncode == 0 else "更新失败"); return
+        send(chat, "未知命令", MENU); return
     act = state.pop(chat, None)
     if act == "add_exit":
         try:
@@ -456,6 +498,17 @@ def main():
     post("setMyCommands", {"commands": [
         {"command": "start", "description": "状态与菜单"},
         {"command": "status", "description": "查看状态"},
+        {"command": "exits", "description": "出口列表"},
+        {"command": "addexit", "description": "添加出口(ss/vmess/trojan/vless)"},
+        {"command": "delexit", "description": "删除出口"},
+        {"command": "rules", "description": "分流规则"},
+        {"command": "addrule", "description": "添加规则(域名→出口|direct)"},
+        {"command": "delrule", "description": "删除规则"},
+        {"command": "addrs", "description": "添加规则集(.list/.srs URL→出口)"},
+        {"command": "delrs", "description": "删除规则集"},
+        {"command": "setfinal", "description": "设默认出口"},
+        {"command": "restart", "description": "重启服务"},
+        {"command": "update", "description": "更新规则库"},
         {"command": "cancel", "description": "取消当前操作"}]})
     print("pdg-bot v2 started, allowed:", ALLOWED, flush=True)
     off = 0
