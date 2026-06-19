@@ -71,6 +71,29 @@ JP outbound 也要支持 UDP（V1 先跑稳 TCP，UDP 留到 V5）。
 - 放行 80/443 给客户端网段（流量入口）。
 - DoT/DoH 的 dnsdist ACL 建议收窄到客户端网段，避免长期对全网开放成开放解析器。
 
+## 墙内内网卡 / WiFi / MSS clamp
+
+- **DNS 公网暴露**：dnsdist 的 DoT(853)/DoH(8443) 监听在 JP **公网** IP，
+  这样内网卡和普通 WiFi 都能查 DNS（WiFi 才不会 fail-closed 没网）。
+- **流量入口私网**：`pdg.conf` 的 `jp_internal_ip` 是 JP **私网** 地址，仅内网卡/隧道可达。
+- **按来源分流**：`pdg.conf` 的 `internal_src_cidr` 填【内网卡运营商内网段 + 隧道段】。
+  只有来自这些来源的代理域名才 spoof，普通 WiFi 自动降级直连。地址固定，**不受家宽动态公网 IP 影响**。
+- **家里 WiFi 也要代理**：在家用路由器上把 JP 的 DNS 公网 IP 与私网入口 IP **路由进隧道**，
+  使家里查询从隧道私网源到达 JP（落进 `internal_src_cidr`）。
+
+### MSS clamp（修复 Play / 大下载卡死）
+隧道压低了 MTU，不做 MSS clamp 会出现「小请求通、app 更新/大文件卡死」。
+在**隧道接口**（如 WireGuard `wg0`）上 clamp：
+
+```bash
+nft add table inet mangle 2>/dev/null || true
+nft 'add chain inet mangle forward { type filter hook forward priority mangle; }' 2>/dev/null || true
+nft 'add rule inet mangle forward oifname "wg0" tcp flags syn tcp option maxseg size set rt mtu'
+nft 'add rule inet mangle forward iifname "wg0" tcp flags syn tcp option maxseg size set rt mtu'
+```
+
+QUIC 由 DNS 层处理：代理域名屏蔽 HTTPS/SVCB 记录、JP 侧不接管 UDP 443 → 客户端回落 TCP。
+
 ## 运维
 - 改规则：编辑 `/etc/pdg/rules.conf`（或 `pdg rule add/del/move`）→ `pdg reload`。
 - 更新远程规则集：`pdg update-rules`（失败自动回退旧缓存）。

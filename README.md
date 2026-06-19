@@ -76,8 +76,10 @@ sudo pdg doctor
 
 ## 现状
 
-- ✅ **V2 规则编译器内核**: 单一规则源 → dnsdist + sing-box + nftables，含远程 RULE-SET 缓存/回退、校验、rollback、`test`/`doctor`/`status`。
-- ⬜ V0/V1 链路在 JP 机上的实跑验证（透明入口 sniff、SS2022 出口连通）。
-- ⬜ V3 iOS mobileconfig 自动生成 / V4 TG Bot / V5 UDP·QUIC。
+- ✅ **已在 JP 实跑上线（Path A）**：复用 5GPN 的 dnsdist/ClouDNS/172.22，sing-box 1.12 多出口
+  （AI→TW，Google/媒体/TG→HK，默认→JP），TCP + QUIC 全通。详见 [docs/production-notes.md](docs/production-notes.md)。
+- ✅ **V2 规则编译器内核**：单一规则源 → sing-box（Path B 另生成 dnsdist/nftables），校验/reload/rollback/test/doctor/status。
+  sing-box 生成器已按实测写法（1.12 `direct` 普通监听 + `sniff_override_destination`，443 收 TCP+UDP/QUIC）。
+- ⬜ Path B（全代理+国内直连，pdg 接管 DNS）/ V3 iOS mobileconfig / V4 TG Bot / Play「等待中」收尾。
 
-见 [ROADMAP.md](ROADMAP.md)。
+见 [ROADMAP.md](ROADMAP.md) 与 [docs/production-notes.md](docs/production-notes.md)。

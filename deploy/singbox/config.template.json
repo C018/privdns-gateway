@@ -1,0 +1,20 @@
+{
+  "_comment": "PrivDNS Gateway — JP 上 sing-box 已验证的生产配置模板 (Path A: 复用 5GPN 的 dnsdist/ClouDNS/172.22, sing-box 只做出口分流). 目标 sing-box 1.12.x (1.13 移除了 sniff_override_destination, 勿升级). 把 HK_/TW_ 占位符换成真实 SS2022 参数后放到 /etc/sing-box/config.json.",
+  "log": { "level": "warn", "timestamp": true },
+  "inbounds": [
+    { "type": "direct", "tag": "in-https", "listen": "0.0.0.0", "listen_port": 443, "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms" },
+    { "type": "direct", "tag": "in-http", "network": "tcp", "listen": "0.0.0.0", "listen_port": 80, "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms" }
+  ],
+  "outbounds": [
+    { "type": "shadowsocks", "tag": "hk", "server": "HK_SERVER", "server_port": 12345, "method": "2022-blake3-aes-128-gcm", "password": "HK_PASSWORD" },
+    { "type": "shadowsocks", "tag": "tw", "server": "TW_SERVER", "server_port": 12345, "method": "2022-blake3-aes-128-gcm", "password": "TW_PASSWORD" },
+    { "type": "direct", "tag": "jp" }
+  ],
+  "route": {
+    "rules": [
+      { "domain_suffix": ["openai.com","chatgpt.com","oaiusercontent.com","anthropic.com","claude.ai","binance.com","binance.info"], "outbound": "tw" },
+      { "domain_suffix": ["google.com","googleapis.com","gstatic.com","googleusercontent.com","ggpht.com","gvt1.com","gvt2.com","gvt3.com","dl.google.com","play.google.com","android.com","youtube.com","googlevideo.com","xn--ngstr-lra8j.com","ytimg.com","netflix.com","nflxvideo.net","x.com","twitter.com","instagram.com","cdninstagram.com","t.me","telegram.org","telegra.ph","telesco.pe"], "outbound": "hk" }
+    ],
+    "final": "jp"
+  }
+}

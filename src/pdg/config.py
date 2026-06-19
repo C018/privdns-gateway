@@ -130,6 +130,8 @@ def load_config(paths: Paths) -> Config:
         outbounds=outbounds,
         policies=policies,
         tproxy_port=int(gw.get("tproxy_port", 7895)),
+        internal_src_cidr=list(gw.get("internal_src_cidr", [])),
+        quic=bool(gw.get("quic", True)),
     )
 
 

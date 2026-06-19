@@ -61,6 +61,11 @@ class Config:
     outbounds: dict[str, Outbound]   # tag -> Outbound
     policies: dict[str, str]         # 策略名 -> 出口 tag
     tproxy_port: int = 7895          # sing-box 透明入口 (nftables TPROXY 目标端口)
+    # 内网来源段: 哪些 DNS 查询来源算"走内网到 JP"(内网卡段/隧道段)。
+    # 只有来自这些来源的代理域名才 spoof; 留空 = 不分来源, 一律 spoof。
+    internal_src_cidr: list[str] = field(default_factory=list)
+    # 443 入口是否同时收 UDP(QUIC)。Play/YouTube 重度用 QUIC, 需出口 SS2022 支持 UDP。
+    quic: bool = True
 
 
 @dataclass(frozen=True)
