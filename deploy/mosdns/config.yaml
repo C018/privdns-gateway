@@ -1,0 +1,57 @@
+log:
+  level: warn
+plugins:
+  - tag: remote_upstream
+    type: forward
+    args: { upstreams: [ {addr: "https://1.1.1.1/dns-query"}, {addr: "udp://8.8.8.8:53"} ] }
+  - tag: local_upstream
+    type: forward
+    args: { upstreams: [ {addr: "https://223.5.5.5/dns-query"}, {addr: "udp://223.5.5.5:53"} ] }
+  - tag: geosite_cn
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/geosite_cn.txt","/etc/mosdns/rules/geosite_apple.txt","/etc/mosdns/rules/custom_direct.txt"] }
+  - tag: npn_clients
+    type: ip_set
+    args: { ips: ["172.22.0.0/16"] }
+  - tag: ecs_china
+    type: ecs_handler
+    args: {forward: false, send: true, preset: "139.226.48.0", mask4: 24, mask6: 48}
+  - tag: ecs_neutral
+    type: ecs_handler
+    args: {forward: false, send: true, preset: "0.0.0.0", mask4: 24, mask6: 48}
+  - tag: has_resp
+    type: sequence
+    args: [ { matches: has_resp, exec: accept } ]
+  - tag: internal_sequence
+    type: sequence
+    args:
+      - matches: qname $geosite_cn
+        exec: $ecs_china
+      - matches: qname $geosite_cn
+        exec: $local_upstream
+      - exec: jump has_resp
+      - matches: qtype 28
+        exec: reject 0
+      - matches: qtype 65
+        exec: reject 0
+      - exec: jump has_resp
+      - matches: qtype 1
+        exec: black_hole __JP_PUBLIC_IP__
+      - exec: jump has_resp
+      - exec: $ecs_neutral
+      - exec: $remote_upstream
+  - tag: main_sequence
+    type: sequence
+    args:
+      - matches: client_ip $npn_clients
+        exec: goto internal_sequence
+      - exec: $remote_upstream
+  - tag: udp_server
+    type: udp_server
+    args: {entry: main_sequence, listen: "0.0.0.0:53"}
+  - tag: tcp_server
+    type: tcp_server
+    args: {entry: main_sequence, listen: "0.0.0.0:53"}
+  - tag: dot_server
+    type: tcp_server
+    args: {entry: main_sequence, listen: "0.0.0.0:853", cert: "/etc/dnsdist/certs/fullchain.pem", key: "/etc/dnsdist/certs/privkey.pem"}

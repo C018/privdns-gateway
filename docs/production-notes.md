@@ -50,3 +50,33 @@ gvt2.com / gvt3.com / android.com`，`systemctl restart dnsdist` 生效。
 - Google CDN 域名是手工逐个加（如 `xn--ngstr-lra8j.com`），易漏；考虑迁 **Path B（全代理+国内直连）**
   从根上免维护。
 - Play「等待中」后续排查。
+
+---
+
+## 阶段二：迁移到 Path B (mosdns) + TG 管理 bot（2026-06-19/20，已部署）
+
+### DNS 层：dnsdist → mosdns
+- mosdns v5.3.4 替换 5GPN 的 dnsdist（53/853，DoT 复用 dnsdist 证书）。dnsdist 已 `disable` 保留作回滚。
+- 模型「国内白名单直连 + 其余一律代理（全代理兜底）」：`geosite_cn`(+apple+custom_direct) 直连真实解析；
+  其余非国内 → A 劫持到服务器 IP、AAAA/HTTPS 置空。配置见 `deploy/mosdns/config.yaml`。
+- 规则来自 geosite.dat（用 `deploy/bot/parse-geosite.py` 手写 protobuf 解析，无 v2dat 依赖）；全量覆盖，不再手补 Google CDN。
+- 关键修正（教程避坑③）：AAAA/HTTPS 只对**代理域名**回空、对**直连域名**回真实，否则苹果系 / captive.apple.com 异常。
+- ECS：国内 `139.226.48.0/24`，海外中性 `0.0.0.0`。
+- 本机自身 DNS：`resolv.conf` → `127.0.0.1`(mosdns)+`1.1.1.1`，修好了原本空解析（bot 才能解析 api.telegram.org）。
+
+### sing-box 调整
+- 443 入口加 UDP 处理 QUIC（HK SS2022 支持 UDP）。
+- ⚠️ **修复 UDP 自环**：QUIC 嗅探失败的包目标仍是服务器自身 IP → 落 jp 直连又发回自己 → 死循环刷屏（曾 3 分钟 9.5 万行日志）。
+  解法：route 首条 `{"ip_cidr":["<本机IP>/32","127.0.0.0/8"],"action":"reject"}`。
+- 分流：国内直连 / AI·加密货币 → tw / 其余国际 → hk（`route.final=hk`）。
+
+### TG 管理 bot（`deploy/bot/`）
+- `pdg-bot.py`：纯标准库 long-poll，仅认指定 user id；改 sing-box 前备份、`check` 失败自动回滚。
+- 功能：状态 / 出口（列表·添加[ss/vmess/trojan/vless]·删除·设默认）/ 分流规则（增·删·域名→出口|direct）/
+  规则集（Surge `.list` URL → sing-box 本地 rule_set，可刷新）/ 重启 / 更新规则库。
+- systemd `pdg-bot.service`（token + allowed 只写本机，不进版本库）。
+- 自定义直连写入 `/etc/mosdns/rules/custom_direct.txt`（已接入 `geosite_cn`）。
+
+### 已知限制
+- **Telegram App** 走硬编码 DC IP、不过 DNS 网关 → 始终走内网卡默认出口（日本），无法定向到 HK（除非真 VPN/IP 路由）。
+- **TFO**：mosdns DoT 不支持也会优雅回落，Android/iOS 均不会因此断网。

@@ -74,12 +74,17 @@ sudo pdg doctor
 | `pdg ruleset list \| refresh <name>` | 远程 RULE-SET 管理 |
 | `pdg rule add\|del\|move ...` | 编辑 rules.conf |
 
-## 现状
+## 现状（JP 实跑上线，Path B + TG bot）
 
-- ✅ **已在 JP 实跑上线（Path A）**：复用 5GPN 的 dnsdist/ClouDNS/172.22，sing-box 1.12 多出口
-  （AI→TW，Google/媒体/TG→HK，默认→JP），TCP + QUIC 全通。详见 [docs/production-notes.md](docs/production-notes.md)。
-- ✅ **V2 规则编译器内核**：单一规则源 → sing-box（Path B 另生成 dnsdist/nftables），校验/reload/rollback/test/doctor/status。
-  sing-box 生成器已按实测写法（1.12 `direct` 普通监听 + `sniff_override_destination`，443 收 TCP+UDP/QUIC）。
-- ⬜ Path B（全代理+国内直连，pdg 接管 DNS）/ V3 iOS mobileconfig / V4 TG Bot / Play「等待中」收尾。
+- ✅ **DNS 层 = mosdns**：geosite「国内直连 + 其余全代理兜底」，AAAA/HTTPS 仅对代理域名置空、直连域名回真实，
+  ECS 国内/海外分治；替换 5GPN 的 dnsdist（保留作回滚）。配置 [deploy/mosdns/config.yaml](deploy/mosdns/config.yaml)。
+- ✅ **流量层 = sing-box 1.12**：`direct` 普通监听 + `sniff_override_destination`（80/443 TCP + 443 QUIC），
+  多出口（AI·加密→TW，其余国际→HK），含 UDP 自环 reject 修复。
+- ✅ **TG 管理 bot**：[deploy/bot/](deploy/bot)，管出口（ss/vmess/trojan/vless）、分流规则、Surge 规则集、重启/更新。
+- ✅ 实测全通：YouTube / ChatGPT / Google / Play / 国内直连。详见 [docs/production-notes.md](docs/production-notes.md)。
+- ⬜ 已知限制：Telegram App（硬编码 IP，走日本，改不了）；V3 iOS OnDemand mobileconfig。
+
+> 仓库里的 `src/pdg`（规则编译器内核）+ `deploy/singbox` 是早期 Path A 的实现与模板；线上现以 mosdns(Path B)
+> + sing-box + bot 为准，见 [docs/production-notes.md](docs/production-notes.md)。
 
 见 [ROADMAP.md](ROADMAP.md) 与 [docs/production-notes.md](docs/production-notes.md)。
