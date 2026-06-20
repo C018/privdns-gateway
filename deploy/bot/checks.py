@@ -39,13 +39,20 @@ def _internal_cidr():
     m = re.search(r'ips:\s*\[\s*"([^"]+)"', _mos())
     return m.group(1) if m else ""
 
+def _cert_cn():
+    _, out, _ = _run(["openssl", "x509", "-in", _cert_path(), "-noout", "-subject"])
+    m = re.search(r"CN\s*=\s*([A-Za-z0-9.*-]+)", out)
+    return m.group(1) if m else ""
+
 def _dot_domain():
+    # 证书 CN = mosdns 实际服务、手机 TLS 必须匹配的域名(权威); dot-domain 文件只是续期提示, 可能过期
+    return _cert_cn() or _dot_file()
+
+def _dot_file():
     try:
         return open(DOT_DOMAIN_FILE).read().strip()
     except Exception:  # noqa: BLE001
-        _, out, _ = _run(["openssl", "x509", "-in", _cert_path(), "-noout", "-subject"])
-        m = re.search(r"CN\s*=\s*([A-Za-z0-9.*-]+)", out)
-        return m.group(1) if m else ""
+        return ""
 
 def check_services():
     bad = [s for s in ("mosdns", "sing-box", "pdg-bot", "pdg-probe81")
@@ -76,6 +83,16 @@ def check_dot_arecord():
     if not ips:
         return ("warn", "DoT A 记录", f"{d} 解析不到 A 记录")
     return ("fail", "DoT A 记录", f"{d} → {ips[0]}, 不是本机 {sip}")
+
+def check_dot_domain_sync():
+    """dot-domain 文件(续期 deploy-hook 据它选证书)应与证书 CN 一致, 否则续期会部署错证书、DoT 失配。"""
+    cn = _cert_cn(); f = _dot_file()
+    if not cn or not f:
+        return ("ok", "DoT 域名一致性", "无需检查")
+    if f != cn:
+        return ("warn", "DoT 域名一致性",
+                f"dot-domain={f} 与证书 CN={cn} 不一致; 续期可能部署错证书。建议: echo {cn} > {DOT_DOMAIN_FILE}")
+    return ("ok", "DoT 域名一致性", f"{cn} ✓")
 
 def check_internal_cidr():
     c = _internal_cidr()
@@ -127,8 +144,8 @@ def check_singbox_config():
     return ("ok", "sing-box 配置", "check 通过") if rc == 0 \
         else ("fail", "sing-box 配置", "check 失败: " + (out + err)[-200:])
 
-ALL = [check_services, check_singbox_version, check_dot_arecord, check_internal_cidr,
-       check_nft, check_cert, check_dns, check_singbox_config]
+ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
+       check_internal_cidr, check_nft, check_cert, check_dns, check_singbox_config]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 
 def run(funcs=None):
