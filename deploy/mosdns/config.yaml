@@ -22,9 +22,19 @@ plugins:
   - tag: has_resp
     type: sequence
     args: [ { matches: has_resp, exec: accept } ]
+  # 响应缓存 (lazy: TTL 过期也先返旧应答再后台刷新, 降时延/上游压力)。
+  # 只在 internal_sequence 内缓存: 该分支按 qname+qtype 决定 (直连真IP / 代理服IP / 置空),
+  # 与来源无关, 缓存安全; 普通 WiFi 来源那条 (回真实IP) 不缓存, 避免跨来源污染。
+  - tag: lazy_cache
+    type: cache
+    args:
+      size: 8192
+      lazy_cache_ttl: 86400
   - tag: internal_sequence
     type: sequence
     args:
+      - exec: $lazy_cache
+      - exec: jump has_resp
       - matches: qname $geosite_cn
         exec: $ecs_china
       - matches: qname $geosite_cn

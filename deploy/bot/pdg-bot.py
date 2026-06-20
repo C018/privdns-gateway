@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""PrivDNS Gateway — Telegram 管理 bot v2 (纯标准库, long-poll)。
+"""PrivDNS Gateway — Telegram 管理 bot v3 (纯标准库, long-poll)。
 
-出口  : 列表 / 添加(ss/vmess/trojan/vless 链接) / 删除 / 设默认出口
+出口  : 列表 / 添加(ss/vmess/trojan/vless 链接) / 删除 / 设默认出口 / 故障切换组(urltest)
 分流  : 规则列表 / 添加(域名→出口|direct) / 删除 / 添加规则集(Surge .list URL→出口) / 删除规则集
-服务  : 状态 / 重启 / 更新规则库(geosite + 各规则集)
+诊断  : 状态 / 端到端测出口延迟(clash_api) / 流量统计(clash_api)
+运维  : 重启 / 更新规则库(geosite + 规则集) / iOS 描述文件下发 / 配置备份·恢复
 
 UI 原地编辑消息(editMessageText), 不刷屏。改 sing-box 前备份, check 失败自动回滚。
 环境变量: PDG_BOT_TOKEN, PDG_BOT_ALLOWED(逗号分隔的 user id)
+注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, hashlib, json, os, re, shutil, socket, subprocess, time, urllib.parse, urllib.request
+import base64, hashlib, io, json, os, re, shutil, socket, subprocess, tarfile, tempfile, time, uuid
+import urllib.parse, urllib.request, urllib.error
+from collections import Counter
 
-TOKEN = os.environ["PDG_BOT_TOKEN"]
+TOKEN = os.environ.get("PDG_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("PDG_BOT_ALLOWED", "").replace(" ", "").split(",") if x}
 SB = "/etc/sing-box/config.json"
 RS_DIR = "/etc/sing-box/rs"
+MOSDNS_CONF = "/etc/mosdns/config.yaml"
 MOSDNS_DIRECT = "/etc/mosdns/rules/custom_direct.txt"
 RS_META = "/opt/pdg-bot/rulesets.json"
 UPDATE_SCRIPT = "/opt/pdg-bot/update-rules.sh"
+IOS_TMPL = "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"
+CERT = "/etc/dnsdist/certs/fullchain.pem"
+CLASH = "http://127.0.0.1:9090"
+DELAY_URL = "http://www.gstatic.com/generate_204"
 API = "https://api.telegram.org/bot" + TOKEN
 state: dict[int, str] = {}
 
@@ -31,13 +40,45 @@ def post(method, params):
     except Exception as e:  # noqa: BLE001
         print("api", method, e); return {}
 
+def send_document(chat, filename, data, caption=""):
+    """multipart/form-data 上传文件 (备份 / iOS 描述文件)。"""
+    boundary = "----pdg" + uuid.uuid4().hex
+    pre = []
+    def fld(name, val):
+        pre.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{val}\r\n").encode())
+    fld("chat_id", str(chat))
+    if caption:
+        fld("caption", caption); fld("parse_mode", "HTML")
+    head = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; "
+            f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+    body = b"".join(pre) + head + data + b"\r\n" + (f"--{boundary}--\r\n").encode()
+    req = urllib.request.Request(API + "/sendDocument", data=body,
+                                 headers={"Content-Type": "multipart/form-data; boundary=" + boundary})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.load(r)
+    except Exception as e:  # noqa: BLE001
+        print("senddoc", e); send_plain(chat, f"发送文件失败: {e}"); return {}
+
+def tg_download(file_id):
+    r = post("getFile", {"file_id": file_id})
+    fp = r.get("result", {}).get("file_path")
+    if not fp:
+        raise ValueError("getFile 失败")
+    with urllib.request.urlopen(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", timeout=120) as resp:
+        return resp.read()
+
 MENU = {"inline_keyboard": [
-    [{"text": "📊 状态", "callback_data": "status"}, {"text": "🚦 测出口", "callback_data": "test"}],
-    [{"text": "📋 出口列表", "callback_data": "exits"}, {"text": "➕ 添加出口", "callback_data": "add_exit"}],
-    [{"text": "🗑 删除出口", "callback_data": "del_exit"}, {"text": "🎯 设默认出口", "callback_data": "setfinal"}],
-    [{"text": "📑 分流规则", "callback_data": "rules"}, {"text": "➕ 添加规则", "callback_data": "add_rule"}],
-    [{"text": "🗑 删除规则", "callback_data": "del_rule"}],
-    [{"text": "📚 添加规则集", "callback_data": "add_rs"}, {"text": "🗑 删除规则集", "callback_data": "del_rs"}],
+    [{"text": "📊 状态", "callback_data": "status"}, {"text": "🚦 测出口", "callback_data": "test"},
+     {"text": "📈 流量", "callback_data": "traffic"}],
+    [{"text": "📋 出口列表", "callback_data": "exits"}, {"text": "➕ 添加出口", "callback_data": "add_exit"},
+     {"text": "🗑 删出口/组", "callback_data": "del_exit"}],
+    [{"text": "🎯 设默认出口", "callback_data": "setfinal"}, {"text": "🔀 故障切换组", "callback_data": "add_grp"}],
+    [{"text": "📑 分流规则", "callback_data": "rules"}, {"text": "➕ 添加规则", "callback_data": "add_rule"},
+     {"text": "🗑 删规则", "callback_data": "del_rule"}],
+    [{"text": "📚 添加规则集", "callback_data": "add_rs"}, {"text": "🗑 删规则集", "callback_data": "del_rs"}],
+    [{"text": "📱 iOS 描述文件", "callback_data": "ios"}, {"text": "💾 备份", "callback_data": "backup"},
+     {"text": "♻️ 恢复", "callback_data": "restore"}],
     [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
 ]}
 BACK = {"inline_keyboard": [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
@@ -60,6 +101,17 @@ def edit(chat, mid, text, kb=None):
 def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
+# ── clash_api (sing-box experimental) ──
+def clash_get(path):
+    with urllib.request.urlopen(CLASH + path, timeout=12) as r:
+        return json.load(r)
+
+def clash_up():
+    try:
+        clash_get("/version"); return True
+    except Exception:  # noqa: BLE001
+        return False
+
 # ── sing-box ──
 def load():
     return json.load(open(SB))
@@ -80,11 +132,22 @@ def apply_sb(modify):
     r = sh(["systemctl", "restart", "sing-box"])
     return r.returncode == 0, (r.stdout + r.stderr)[-300:]
 
+PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless")
+
 def proxy_outbounds(c):
-    return [o for o in c["outbounds"] if o.get("type") in ("shadowsocks", "vmess", "trojan", "vless")]
+    return [o for o in c["outbounds"] if o.get("type") in PROXY_TYPES]
 
 def exit_tags(c):
-    return [o["tag"] for o in c["outbounds"] if o.get("type") in ("shadowsocks", "vmess", "trojan", "vless", "direct")]
+    """可作分流目标/默认出口的全部出口 (含 direct 与 urltest 故障组)。"""
+    return [o["tag"] for o in c["outbounds"] if o.get("type") in PROXY_TYPES + ("direct", "urltest")]
+
+def concrete_tags(c):
+    """具体出口 (可作故障组成员; 排除 urltest 组自身, 防嵌套环)。"""
+    return [o["tag"] for o in c["outbounds"] if o.get("type") in PROXY_TYPES + ("direct",)]
+
+def deletable_tags(c):
+    """可删除的出口/组 (代理出口 + urltest 组; 不含 jp direct)。"""
+    return [o["tag"] for o in c["outbounds"] if o.get("type") in PROXY_TYPES + ("urltest",)]
 
 def _tag(name, host, port):
     return re.sub(r"[^A-Za-z0-9_.-]", "-", (name or f"{host}:{port}"))[:40] or "exit"
@@ -177,6 +240,26 @@ def _parse_vless(link):
     if tr:
         ob["transport"] = tr
     return ob
+
+# ── 故障切换组 (urltest) ──
+def add_group(name, members):
+    c = load(); cands = concrete_tags(c)
+    members = [m for m in members if m]
+    name = _tag(name, "", "")
+    if name in cands:
+        return False, f"组名 {name} 和现有出口冲突, 换个名字"
+    bad = [m for m in members if m not in cands]
+    if bad:
+        return False, f"未知成员: {', '.join(bad)}\n只能用具体出口: {', '.join(cands)}"
+    if len(members) < 2:
+        return False, "故障切换组至少要 2 个出口"
+    def mod(cc):
+        cc["outbounds"] = [o for o in cc["outbounds"] if o.get("tag") != name]
+        cc["outbounds"].append({"type": "urltest", "tag": name, "outbounds": members,
+                                "url": DELAY_URL, "interval": "3m", "tolerance": 50})
+    ok, msg = apply_sb(mod)
+    return ok, (f"✅ 故障切换组 <b>{name}</b> = {' › '.join(members)}\n"
+                "自动选最快, 成员故障自动切换。可在「🎯 设默认出口」或分流规则里选它。" if ok else msg)
 
 # ── 直连表 (mosdns) ──
 def _read_direct():
@@ -297,8 +380,12 @@ def del_ruleset(name):
     return False, msg
 
 def refresh_rulesets():
+    """重新下载并重建所有规则集 (供 bot 与定时任务调用; 无需 token)。"""
     m = _rs_meta(); n = 0
     for name, info in m.items():
+        # 兼容早期缺 format/path 的旧条目 (按 name 回填, 否则刷新会 KeyError)。
+        info.setdefault("format", "binary" if str(info.get("path", "")).endswith(".srs") else "source")
+        info.setdefault("path", os.path.join(RS_DIR, name + (".srs" if info["format"] == "binary" else ".json")))
         try:
             if info.get("format") == "binary":
                 open(info["path"], "wb").write(_fetch_bytes(info["url"]))
@@ -311,9 +398,9 @@ def refresh_rulesets():
         _save_rs_meta(m); sh(["systemctl", "restart", "sing-box"])
     return n
 
-def test_exits():
-    """对每个代理出口做 JP→落地的 TCP 握手, 测连通+延迟。"""
-    obs = proxy_outbounds(load())
+# ── 测出口 (端到端延迟, clash_api; TCP 兜底) ──
+def _test_exits_tcp(c):
+    obs = proxy_outbounds(c)
     if not obs:
         return "(无代理出口)"
     lines = []
@@ -327,6 +414,53 @@ def test_exits():
         except Exception:  # noqa: BLE001
             lines.append(f"❌ <b>{o['tag']}</b>  不通  ({host}:{port})")
     return "出口连通/延迟 (JP→落地 TCP 握手):\n" + "\n".join(lines)
+
+def test_exits():
+    c = load()
+    if not clash_up():
+        return _test_exits_tcp(c)
+    tags = exit_tags(c)
+    if not tags:
+        return "(无出口)"
+    lines = []
+    for t in tags:
+        q = urllib.parse.quote(t, safe="")
+        try:
+            d = clash_get(f"/proxies/{q}/delay?timeout=5000&url=" + urllib.parse.quote(DELAY_URL))
+            lines.append(f"✅ <b>{t}</b>  {d['delay']}ms")
+        except urllib.error.HTTPError:
+            lines.append(f"❌ <b>{t}</b>  超时/不通")
+        except Exception:  # noqa: BLE001
+            lines.append(f"❌ <b>{t}</b>  不通")
+    return "出口端到端延迟 (经各出口→generate_204):\n" + "\n".join(lines)
+
+# ── 流量统计 (clash_api) ──
+def _fmt_bytes(n):
+    n = float(n or 0)
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return (f"{n:.0f}{u}" if u == "B" else f"{n:.1f}{u}")
+        n /= 1024
+    return f"{n:.1f}PB"
+
+def traffic_text():
+    if not clash_up():
+        return "clash_api 未响应 (刚重启请稍候重试)。"
+    try:
+        d = clash_get("/connections")
+    except Exception as e:  # noqa: BLE001
+        return f"读取连接失败: {e}"
+    conns = d.get("connections") or []
+    cnt, up, dn = Counter(), Counter(), Counter()
+    for cn in conns:
+        chain = cn.get("chains") or []
+        tag = chain[0] if chain else "?"
+        cnt[tag] += 1; up[tag] += cn.get("upload", 0); dn[tag] += cn.get("download", 0)
+    lines = [f"• <b>{t}</b>: {cnt[t]}条  ↑{_fmt_bytes(up[t])} ↓{_fmt_bytes(dn[t])}"
+             for t, _ in cnt.most_common()]
+    return ("📈 <b>流量统计</b>\n"
+            f"累计 ↑{_fmt_bytes(d.get('uploadTotal'))}  ↓{_fmt_bytes(d.get('downloadTotal'))}\n"
+            f"活跃连接: {len(conns)}\n" + ("按出口:\n" + "\n".join(lines) if lines else "(当前无活跃连接)"))
 
 # ── 单条规则增删 ──
 def add_rule(domain, target):
@@ -368,6 +502,75 @@ def del_rule(domain):
         _write_direct([d for d in _read_direct() if d != domain]); removed.append("直连表")
     return (bool(removed), f"已删除 {domain} ({'+'.join(removed)})" if removed else f"未找到含 {domain} 的规则")
 
+# ── iOS 描述文件 ──
+def _ios_profile():
+    if not os.path.exists(IOS_TMPL):
+        raise FileNotFoundError("缺少模板 " + IOS_TMPL)
+    t = open(IOS_TMPL).read()
+    return (t.replace("__DOT_HOST__", _dot_host())
+             .replace("__JP_IP__", _server_ip())
+             .replace("__UUID1__", str(uuid.uuid4()).upper())
+             .replace("__UUID2__", str(uuid.uuid4()).upper())).encode()
+
+# ── 配置备份 / 恢复 ──
+BACKUP_FILES = [SB, MOSDNS_CONF, MOSDNS_DIRECT, RS_META]
+RESTORE_MAP = {
+    "etc/sing-box/config.json": SB,
+    "etc/mosdns/config.yaml": MOSDNS_CONF,
+    "etc/mosdns/rules/custom_direct.txt": MOSDNS_DIRECT,
+    "opt/pdg-bot/rulesets.json": RS_META,
+}
+
+def backup_blob():
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for p in BACKUP_FILES:
+            if os.path.exists(p):
+                tar.add(p, arcname=p.lstrip("/"))
+        if os.path.isdir(RS_DIR):
+            tar.add(RS_DIR, arcname=RS_DIR.lstrip("/"))
+    return buf.getvalue()
+
+def restore_from(data):
+    try:
+        tar = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
+    except Exception:  # noqa: BLE001
+        return False, "不是有效的 .tar.gz 备份文件"
+    tmp = tempfile.mkdtemp(prefix="pdgrs")
+    try:
+        for m in tar.getmembers():
+            if m.name.startswith("/") or ".." in m.name.split("/"):
+                continue
+            try:
+                tar.extract(m, tmp)
+            except Exception:  # noqa: BLE001
+                pass
+        newsb = os.path.join(tmp, "etc/sing-box/config.json")
+        if not os.path.exists(newsb):
+            return False, "备份里没有 sing-box 配置, 拒绝恢复"
+        chk = sh(["sing-box", "check", "-c", newsb])
+        if chk.returncode != 0:
+            return False, "备份的 sing-box 配置校验失败:\n" + (chk.stdout + chk.stderr)[-300:]
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        shutil.copy(SB, SB + ".pre-restore-" + ts)
+        restored = []
+        for arc, dst in RESTORE_MAP.items():
+            src = os.path.join(tmp, arc)
+            if os.path.exists(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy(src, dst); restored.append(os.path.basename(dst))
+        src_rs = os.path.join(tmp, RS_DIR.lstrip("/"))
+        if os.path.isdir(src_rs):
+            shutil.rmtree(RS_DIR, ignore_errors=True); shutil.copytree(src_rs, RS_DIR); restored.append("rs/")
+        r1 = sh(["systemctl", "restart", "sing-box"])
+        if r1.returncode != 0:
+            shutil.copy(SB + ".pre-restore-" + ts, SB); sh(["systemctl", "restart", "sing-box"])
+            return False, "恢复后 sing-box 启动失败, 已回滚 sing-box"
+        sh(["systemctl", "restart", "mosdns"])
+        return True, "已恢复: " + ", ".join(restored) + "\n已重启 sing-box + mosdns"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 # ── 文案 ──
 _DOT_HOST = None
 
@@ -375,8 +578,7 @@ def _dot_host():
     global _DOT_HOST
     if _DOT_HOST is None:
         try:
-            out = sh(["openssl", "x509", "-in", "/etc/dnsdist/certs/fullchain.pem",
-                      "-noout", "-subject"]).stdout
+            out = sh(["openssl", "x509", "-in", CERT, "-noout", "-subject"]).stdout
             m = re.search(r"CN\s*=\s*([A-Za-z0-9.*-]+)", out)
             _DOT_HOST = m.group(1) if m else "?"
         except Exception:  # noqa: BLE001
@@ -394,18 +596,24 @@ def _server_ip():
         pass
     return "?"
 
+def _groups_desc(c):
+    g = [o for o in c["outbounds"] if o.get("type") == "urltest"]
+    return "\n".join(f"🔀 故障组 <b>{o['tag']}</b>: {' › '.join(o.get('outbounds', []))}" for o in g)
+
 def status_text():
     def dot(s):
         return "🟢" if sh(["systemctl", "is-active", s]).stdout.strip() == "active" else "🔴"
     c = load(); exits = exit_tags(c)
+    g = _groups_desc(c)
     return ("🖥 <b>PrivDNS Gateway</b>\n\n"
-            f"{dot('mosdns')} mosdns（DNS 分流）\n"
+            f"{dot('mosdns')} mosdns（DNS 分流, 带缓存）\n"
             f"{dot('sing-box')} sing-box（流量出口）\n"
             f"{dot('pdg-bot')} pdg-bot（管理）\n\n"
             f"📡 DoT: <code>{_dot_host()}:853</code>（Android 私密DNS / iOS 描述文件）\n"
             f"🌐 IP: <code>{_server_ip()}</code>\n"
             f"📤 出口({len(exits)}): {', '.join(exits)}\n"
-            f"🎯 默认出口(其余国际): <b>{c['route'].get('final')}</b>\n"
+            + (g + "\n" if g else "")
+            + f"🎯 默认出口(其余国际): <b>{c['route'].get('final')}</b>\n"
             f"📚 规则集: {len(_rs_meta())} 个\n"
             "🌏 分流: 国内直连 / AI·加密→tw / 其余→默认出口")
 
@@ -413,7 +621,12 @@ def exits_text():
     c = load(); lines = []
     for o in proxy_outbounds(c):
         lines.append(f'• <b>{o["tag"]}</b>  {o["type"]}  {o.get("server")}:{o.get("server_port")}')
-    return "代理出口:\n" + ("\n".join(lines) or "(无)")
+    for o in c["outbounds"]:
+        if o.get("type") == "direct":
+            lines.append(f'• <b>{o["tag"]}</b>  direct（本机直出）')
+        elif o.get("type") == "urltest":
+            lines.append(f'• <b>{o["tag"]}</b>  故障组 → {" › ".join(o.get("outbounds", []))}')
+    return "出口:\n" + ("\n".join(lines) or "(无)")
 
 def rules_text():
     c = load(); lines = []; m = _rs_meta()
@@ -440,12 +653,12 @@ def kb_pick(prefix, tags):
 
 # ── 回调 (原地编辑) ──
 def handle_cb(chat, mid, data):
-    if data == "menu":
-        edit(chat, mid, status_text(), MENU); return
-    if data == "status":
+    if data in ("menu", "status"):
         edit(chat, mid, status_text(), MENU); return
     if data == "test":
         edit(chat, mid, "测试中…", None); edit(chat, mid, test_exits(), BACK); return
+    if data == "traffic":
+        edit(chat, mid, traffic_text(), BACK); return
     if data == "exits":
         edit(chat, mid, exits_text(), BACK); return
     if data == "rules":
@@ -453,6 +666,11 @@ def handle_cb(chat, mid, data):
     if data == "add_exit":
         state[chat] = "add_exit"
         edit(chat, mid, "发一条节点链接：<code>ss:// / vmess:// / trojan:// / vless://</code>\n/cancel 取消。", BACK); return
+    if data == "add_grp":
+        state[chat] = "add_group"
+        edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」建故障切换组(自动选最快/坏了自动切)。\n"
+             f"可选成员: {', '.join(concrete_tags(load()))}\n例: <code>main hk tw us</code>\n"
+             "建好后可在「🎯 设默认出口」或规则里选它。/cancel 取消。", BACK); return
     if data == "add_rule":
         state[chat] = "add_rule"
         edit(chat, mid, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>\n例: <code>netflix.com hk</code> / <code>x.cn direct</code>\n/cancel 取消。", BACK); return
@@ -468,14 +686,42 @@ def handle_cb(chat, mid, data):
             edit(chat, mid, "没有已添加的规则集", BACK); return
         edit(chat, mid, "选择要删除的规则集：", kb_pick("delrs", list(m.keys()))); return
     if data == "del_exit":
-        edit(chat, mid, "选择要删除的出口：", kb_pick("delx", [o["tag"] for o in proxy_outbounds(load())])); return
+        tags = deletable_tags(load())
+        edit(chat, mid, "选择要删除的出口/故障组：" if tags else "没有可删的出口",
+             kb_pick("delx", tags) if tags else BACK); return
     if data == "setfinal":
-        edit(chat, mid, "「其余国际」默认走哪个出口：", kb_pick("fin", exit_tags(load()))); return
+        edit(chat, mid, "「其余国际」默认走哪个出口/组：", kb_pick("fin", exit_tags(load()))); return
+    if data == "ios":
+        edit(chat, mid, "正在生成 iOS 描述文件…", None)
+        try:
+            send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(),
+                          f"📱 iOS/iPadOS 私密DNS 描述文件 (DoT {_dot_host()} → {_server_ip()})\n"
+                          "装法: 存到「文件」App → 点开 → 设置→「通用」→「已下载描述文件」→ 安装。\n"
+                          "⚠️ OnDemand 蜂窝规则探测 http://&lt;IP&gt;:81/probe, 需在服务器放一个只对内网卡放行的 "
+                          ":81→204 端点才会在蜂窝下激活(可让我帮你配)。")
+            edit(chat, mid, "✅ 描述文件已发送(见上一条)。", MENU)
+        except Exception as e:  # noqa: BLE001
+            edit(chat, mid, f"生成失败: {e}", MENU)
+        return
+    if data == "backup":
+        edit(chat, mid, "正在打包配置…", None)
+        try:
+            fn = "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz"
+            send_document(chat, fn, backup_blob(),
+                          "💾 配置备份(含 sing-box 出口密码, 请妥善保存)。\n恢复: 点「♻️ 恢复」后把此文件发回。")
+            edit(chat, mid, "✅ 备份已发送(见上一条)。", MENU)
+        except Exception as e:  # noqa: BLE001
+            edit(chat, mid, f"备份失败: {e}", MENU)
+        return
+    if data == "restore":
+        state[chat] = "restore"
+        edit(chat, mid, "把之前「💾 备份」得到的 <code>.tar.gz</code> 作为文件发给我即可恢复"
+             "(先 sing-box check, 失败自动回滚)。\n/cancel 取消。", BACK); return
     if data == "restart":
         ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
         edit(chat, mid, "✅ 已重启 sing-box + mosdns" if ok else msg, MENU); return
     if data == "updgeo":
-        edit(chat, mid, "正在更新 geosite + 规则集…", BACK)
+        edit(chat, mid, "正在更新 geosite + 规则集…", None)
         r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
         edit(chat, mid, (f"✅ geosite 已更新; 规则集刷新 {n} 个" if r.returncode == 0
                          else "geosite 更新失败:\n" + (r.stdout + r.stderr)[-300:]), MENU); return
@@ -483,13 +729,19 @@ def handle_cb(chat, mid, data):
         tag = data[5:]
         def mod(c):
             c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != tag]
+            for o in c["outbounds"]:
+                if o.get("type") == "urltest":
+                    o["outbounds"] = [m for m in o.get("outbounds", []) if m != tag]
+            c["outbounds"] = [o for o in c["outbounds"]
+                              if not (o.get("type") == "urltest" and not o.get("outbounds"))]
+            live = {o["tag"] for o in c["outbounds"]}
             for r in c["route"]["rules"]:
-                if r.get("outbound") == tag:
+                if r.get("outbound") and r["outbound"] not in live:
                     r["outbound"] = c["route"].get("final", "hk")
-            if c["route"].get("final") == tag:
-                c["route"]["final"] = next((t for t in exit_tags(c) if t != tag), "direct")
+            if c["route"].get("final") not in live:
+                c["route"]["final"] = next((t for t in exit_tags(c)), "direct")
         ok, msg = apply_sb(mod)
-        edit(chat, mid, f"✅ 已删除出口 {tag}" if ok else msg, MENU); return
+        edit(chat, mid, f"✅ 已删除 {tag}" if ok else msg, MENU); return
     if data.startswith("fin:"):
         tag = data[4:]
         ok, msg = apply_sb(lambda c: c["route"].__setitem__("final", tag))
@@ -508,12 +760,16 @@ def handle_text(chat, text):
         cmd = text.split()[0]
         if cmd == "/test":
             send_plain(chat, "测试中…"); send_plain(chat, test_exits()); return
+        if cmd == "/traffic":
+            send(chat, traffic_text(), BACK); return
         if cmd == "/exits":
             send(chat, exits_text(), BACK); return
         if cmd == "/rules":
             send(chat, rules_text(), BACK); return
         if cmd == "/addexit":
             state[chat] = "add_exit"; send(chat, "发节点链接：<code>ss:// / vmess:// / trojan:// / vless://</code>。/cancel 取消。", BACK); return
+        if cmd == "/group":
+            state[chat] = "add_group"; send(chat, "发「<b>组名 出口1 出口2 …</b>」建故障切换组。/cancel 取消。", BACK); return
         if cmd == "/addrule":
             state[chat] = "add_rule"; send(chat, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>。/cancel 取消。", BACK); return
         if cmd == "/delrule":
@@ -521,12 +777,23 @@ def handle_text(chat, text):
         if cmd == "/addrs":
             state[chat] = "add_rs"; send(chat, "发「<b>规则集URL 出口</b>」（支持 .list / .srs）。/cancel 取消。", BACK); return
         if cmd == "/delexit":
-            send(chat, "选择删除的出口：", kb_pick("delx", [o["tag"] for o in proxy_outbounds(load())])); return
+            tags = deletable_tags(load())
+            send(chat, "选择删除的出口/组：" if tags else "无可删出口", kb_pick("delx", tags) if tags else BACK); return
         if cmd == "/setfinal":
             send(chat, "默认出口：", kb_pick("fin", exit_tags(load()))); return
         if cmd == "/delrs":
             m = _rs_meta()
             send(chat, "选择删除的规则集：" if m else "无规则集", kb_pick("delrs", list(m.keys())) if m else BACK); return
+        if cmd == "/ios":
+            try:
+                send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")
+            except Exception as e:  # noqa: BLE001
+                send_plain(chat, f"生成失败: {e}")
+            return
+        if cmd == "/backup":
+            send_document(chat, "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz", backup_blob(), "💾 配置备份"); return
+        if cmd == "/restore":
+            state[chat] = "restore"; send(chat, "把备份 .tar.gz 作为文件发来。/cancel 取消。", BACK); return
         if cmd == "/restart":
             ok, _ = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"]); send_plain(chat, "✅ 已重启" if ok else "重启失败"); return
         if cmd == "/update":
@@ -545,6 +812,11 @@ def handle_text(chat, text):
         except Exception as e:  # noqa: BLE001
             send_plain(chat, f"解析失败: {e}")
         return
+    if act == "add_group":
+        p = text.split()
+        if len(p) < 3:
+            send_plain(chat, "格式: 组名 出口1 出口2 …(至少2个出口)"); return
+        ok, msg = add_group(p[0], p[1:]); send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act == "add_rule":
         p = text.split()
         send_plain(chat, "格式: 域名 出口" if len(p) != 2 else (lambda r: ("✅ " if r[0] else "") + r[1])(add_rule(p[0], p[1])))
@@ -557,29 +829,47 @@ def handle_text(chat, text):
             send_plain(chat, "格式: 规则集URL 出口"); return
         send_plain(chat, "正在下载规则集…")
         ok, msg = add_ruleset(p[0], p[1]); send_plain(chat, ("✅ " if ok else "") + msg); return
+    if act == "restore":
+        send_plain(chat, "请把备份 <code>.tar.gz</code> 作为「文件」发来, 而不是文字。/cancel 取消。"); state[chat] = "restore"; return
     send_plain(chat, "发 /start 打开菜单")
 
+# ── 文件 (配置恢复) ──
+def handle_document(chat, doc):
+    if state.get(chat) != "restore":
+        send_plain(chat, "如要恢复配置: 先点菜单「♻️ 恢复」再发备份文件。"); return
+    state.pop(chat, None)
+    send_plain(chat, "正在校验并恢复…")
+    try:
+        data = tg_download(doc["file_id"])
+        ok, msg = restore_from(data)
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, f"恢复失败: {e}"
+    send_plain(chat, ("✅ " if ok else "❌ ") + msg)
+
 def main():
+    if not TOKEN:
+        print("PDG_BOT_TOKEN 未设置, 退出"); return
     post("deleteWebhook", {"drop_pending_updates": False})
-    # 菜单只留快捷入口(其余功能走消息里的内联按钮, 避免与按钮重复);
-    # 其它斜杠命令(/exits /addexit /addrs …)仍可手打, 只是不塞进左下角菜单。
     cmds = [
         {"command": "start", "description": "打开菜单 / 状态"},
         {"command": "cancel", "description": "取消当前输入"}]
-    # 两个 scope 都设, 防被其它 bot 残留的高优先级 scope 盖住
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})
-    print("pdg-bot v2 started, allowed:", ALLOWED, flush=True)
+    print("pdg-bot v3 started, allowed:", ALLOWED, flush=True)
     off = 0
     while True:
         r = post("getUpdates", {"offset": off, "timeout": 50})
         for u in r.get("result", []):
             off = u["update_id"] + 1
             try:
-                if "message" in u and "text" in u["message"]:
+                if "message" in u:
                     m = u["message"]
-                    if m["from"]["id"] in ALLOWED:
+                    if m["from"]["id"] not in ALLOWED:
+                        continue
+                    if "text" in m:
                         handle_text(m["chat"]["id"], m["text"])
+                    elif "document" in m:
+                        handle_document(m["chat"]["id"], m["document"])
                 elif "callback_query" in u:
                     q = u["callback_query"]
                     post("answerCallbackQuery", {"callback_query_id": q["id"]})

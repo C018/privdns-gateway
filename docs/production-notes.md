@@ -80,3 +80,44 @@ gvt2.com / gvt3.com / android.com`，`systemctl restart dnsdist` 生效。
 ### 已知限制
 - **Telegram App** 走硬编码 DC IP、不过 DNS 网关 → 始终走内网卡默认出口（日本），无法定向到 HK（除非真 VPN/IP 路由）。
 - **TFO**：mosdns DoT 不支持也会优雅回落，Android/iOS 均不会因此断网。
+
+---
+
+## 阶段三：优化 + 功能扩展（2026-06-20，已部署）
+
+### 优化
+- **mosdns 加 `cache` 插件**（`lazy_cache`，size 8192 / lazy_ttl 86400）。只接在 `internal_sequence`
+  开头（`$lazy_cache` → `jump has_resp`）：该分支按 `qname+qtype` 决定（直连真IP / 代理服IP / 置空），
+  与来源无关，缓存安全；普通 WiFi 来源那条（回真实 IP）**不缓存**，避免跨来源污染。
+  实测命中即时返回，降时延/上游压力。
+- **停用 5GPN 残留 `china-dns-race-proxy`**（监听 127.0.0.1:5301，已被 mosdns 的 `local_upstream`=223.5.5.5
+  取代，无引用）。`systemctl disable --now`，省内存/减面。
+- **小内存实测**：sing-box ~34MB + mosdns ~31MB + pdg-bot ~24MB ≈ **90MB**；1GB 机 `available 795MB`，
+  512MB 小鸡也够。最“虚胖”是 journald(mmap)，可 `SystemMaxUse=50M` 封顶。
+
+### sing-box 加 clash_api + 故障切换组
+- `experimental.clash_api`(127.0.0.1:9090，仅本机) + `cache_file`(/etc/sing-box/cache.db，持久化 urltest 选择)。
+  官方 1.12.25 二进制自带 clash_api。
+- 新增 `urltest` 故障切换组 **`auto` = [hk, tw, us]**（`url`=generate_204，interval 3m，tolerance 50）；
+  自动选最快、成员故障自动切换。**故意不含 jp(direct)**——JP 本机直连延迟最低(14ms)会永远胜出，失去多出口意义。
+  默认 `route.final` 仍 = hk；想要“最快+故障切换”把默认出口设成 auto 即可。
+
+### bot v3 新功能（`deploy/bot/pdg-bot.py`）
+- **端到端测出口**：`test_exits` 改用 clash_api `/proxies/{tag}/delay`（经各出口实测到 generate_204 的真实延迟），
+  clash_api 不可用时回落旧的 JP→落地 TCP 握手。
+- **流量统计**：`/connections` 汇总 累计上下行 + 活跃连接数 + 按出口(chains[0])分组。
+- **故障切换组管理**：`add_group(名 成员…)` 建 urltest 组；`exit_tags` 纳入组(可作默认出口/规则目标)；
+  删除出口时从各组成员清理、空组自动删、悬挂引用回落 final。
+- **iOS 描述文件下发**：由 `/opt/pdg-bot/pdg-dot.mobileconfig.tmpl` 填 DoT host/IP/UUID → `sendDocument` 发到 DM。
+  ⚠️ 模板 OnDemand 蜂窝规则探测 `http://<IP>:81/probe`，需另配一个**只对内网卡(172.22)放行的 :81→204** 端点才会在蜂窝下激活。
+- **配置备份/恢复**：备份 = 打包 sing-box+mosdns+规则集 → `sendDocument`（含出口密码，注意保管）；
+  恢复 = 收 `.tar.gz` → `sing-box check` 通过才应用 → 重启，失败回滚。main 循环新增 `document` 分支(仅 restore 态接收)。
+- 修 `refresh_rulesets`：回填早期缺 `format/path` 的旧条目(否则刷新 KeyError)，顺带补齐 `count`。
+
+### 定时刷新规则库
+- `pdg-rules-update.timer`（每日 04:30 + 随机 30min）→ `scheduled-update.sh`：先 `update-rules.sh`(geosite)，
+  再 `python3 -c "import bot; bot.refresh_rulesets()"`（模块可无 token import）。
+
+### mosdns vs smartdns（结论）
+- **必须 mosdns**：本项目把 DNS 当策略引擎（代理域名 A 改写成服务器 IP、按来源 IP 分支、按域名置空 AAAA/HTTPS、
+  ECS 分治），smartdns 模型是“解析最快真实 IP”，做不到兜底改写与来源分支。smartdns 只适合藏在 mosdns 后面当国内加速上游。

@@ -80,9 +80,12 @@ sudo pdg doctor
   ECS 国内/海外分治；替换 5GPN 的 dnsdist（保留作回滚）。配置 [deploy/mosdns/config.yaml](deploy/mosdns/config.yaml)。
 - ✅ **流量层 = sing-box 1.12**：`direct` 普通监听 + `sniff_override_destination`（80/443 TCP + 443 QUIC），
   多出口（AI·加密→TW，其余国际→HK），含 UDP 自环 reject 修复。
-- ✅ **TG 管理 bot**：[deploy/bot/](deploy/bot)，管出口（ss/vmess/trojan/vless）、分流规则、Surge 规则集、重启/更新。
+- ✅ **TG 管理 bot v3**：[deploy/bot/](deploy/bot)，管出口（ss/vmess/trojan/vless）、**故障切换组(urltest)**、
+  分流规则、Surge 规则集、**端到端测出口/流量统计(clash_api)**、**iOS 描述文件下发**、**配置备份/恢复**、重启/更新。
+- ✅ **mosdns 缓存** + 停用 5GPN 残留进程；**定时刷新规则库**（[pdg-rules-update.timer](deploy/bot/pdg-rules-update.timer)，每日）。
+- ✅ 小内存友好：三件套常驻 ≈ 90MB，512MB 小鸡可跑。
 - ✅ 实测全通：YouTube / ChatGPT / Google / Play / 国内直连。详见 [docs/production-notes.md](docs/production-notes.md)。
-- ⬜ 已知限制：Telegram App（硬编码 IP，走日本，改不了）；V3 iOS OnDemand mobileconfig。
+- ⬜ 已知限制：Telegram App（硬编码 IP，走日本，改不了）；iOS OnDemand 蜂窝探测需服务器侧 :81 probe 端点。
 
 > 仓库里的 `src/pdg`（规则编译器内核）+ `deploy/singbox` 是早期 Path A 的实现与模板；线上现以 mosdns(Path B)
 > + sing-box + bot 为准，见 [docs/production-notes.md](docs/production-notes.md)。
