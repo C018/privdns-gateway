@@ -9,7 +9,7 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 sing-box 前备份, chec
 环境变量: PDG_BOT_TOKEN, PDG_BOT_ALLOWED(逗号分隔的 user id)
 """
 from __future__ import annotations
-import base64, hashlib, json, os, re, shutil, subprocess, urllib.parse, urllib.request
+import base64, hashlib, json, os, re, shutil, socket, subprocess, time, urllib.parse, urllib.request
 
 TOKEN = os.environ["PDG_BOT_TOKEN"]
 ALLOWED = {int(x) for x in os.environ.get("PDG_BOT_ALLOWED", "").replace(" ", "").split(",") if x}
@@ -32,10 +32,11 @@ def post(method, params):
         print("api", method, e); return {}
 
 MENU = {"inline_keyboard": [
-    [{"text": "📊 状态", "callback_data": "status"}, {"text": "📋 出口列表", "callback_data": "exits"}],
-    [{"text": "➕ 添加出口", "callback_data": "add_exit"}, {"text": "🗑 删除出口", "callback_data": "del_exit"}],
+    [{"text": "📊 状态", "callback_data": "status"}, {"text": "🚦 测出口", "callback_data": "test"}],
+    [{"text": "📋 出口列表", "callback_data": "exits"}, {"text": "➕ 添加出口", "callback_data": "add_exit"}],
+    [{"text": "🗑 删除出口", "callback_data": "del_exit"}, {"text": "🎯 设默认出口", "callback_data": "setfinal"}],
     [{"text": "📑 分流规则", "callback_data": "rules"}, {"text": "➕ 添加规则", "callback_data": "add_rule"}],
-    [{"text": "🗑 删除规则", "callback_data": "del_rule"}, {"text": "🎯 设默认出口", "callback_data": "setfinal"}],
+    [{"text": "🗑 删除规则", "callback_data": "del_rule"}],
     [{"text": "📚 添加规则集", "callback_data": "add_rs"}, {"text": "🗑 删除规则集", "callback_data": "del_rs"}],
     [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
 ]}
@@ -203,7 +204,7 @@ def _fetch_surge(url):
     req = urllib.request.Request(url, headers={"User-Agent": "pdg-bot"})
     with urllib.request.urlopen(req, timeout=30) as r:
         text = r.read().decode("utf-8", "ignore")
-    dom, suf, kw = [], [], []
+    dom, suf, kw, ip = [], [], [], []
     for line in text.splitlines():
         line = line.split("#", 1)[0].split("//", 1)[0].strip()
         if not line:
@@ -216,7 +217,9 @@ def _fetch_surge(url):
             suf.append(p[1])
         elif t == "DOMAIN-KEYWORD" and len(p) > 1:
             kw.append(p[1])
-    return dom, suf, kw
+        elif t in ("IP-CIDR", "IP-CIDR6") and len(p) > 1:
+            ip.append(p[1])
+    return dom, suf, kw, ip
 
 def _fetch_bytes(url):
     req = urllib.request.Request(url, headers={"User-Agent": "pdg-bot"})
@@ -224,10 +227,10 @@ def _fetch_bytes(url):
         return r.read()
 
 def _build_source(url, path):
-    """下载 Surge/Clash 文本 .list/.txt → 写 sing-box source rule_set, 返回域名条数。"""
-    dom, suf, kw = _fetch_surge(url)
-    if not (dom or suf or kw):
-        raise ValueError("没解析出域名规则(仅支持 DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD)")
+    """下载 Surge/Clash 文本 → 写 sing-box source rule_set。返回 (条数, 是否纯IP)。"""
+    dom, suf, kw, ip = _fetch_surge(url)
+    if not (dom or suf or kw or ip):
+        raise ValueError("没解析出规则(支持 DOMAIN/-SUFFIX/-KEYWORD/IP-CIDR)")
     rule = {}
     if dom:
         rule["domain"] = dom
@@ -235,8 +238,10 @@ def _build_source(url, path):
         rule["domain_suffix"] = suf
     if kw:
         rule["domain_keyword"] = kw
+    if ip:
+        rule["ip_cidr"] = ip
     json.dump({"version": 1, "rules": [rule]}, open(path, "w"), ensure_ascii=False)
-    return len(dom) + len(suf) + len(kw)
+    return len(dom) + len(suf) + len(kw) + len(ip), (len(dom) + len(suf) + len(kw) == 0)
 
 def add_ruleset(url, target):
     c = load()
@@ -250,10 +255,12 @@ def add_ruleset(url, target):
     try:
         if low.endswith(".srs"):
             path = os.path.join(RS_DIR, name + ".srs"); fmt = "binary"
-            open(path, "wb").write(_fetch_bytes(url)); cnt = "sing-box .srs"
+            open(path, "wb").write(_fetch_bytes(url)); count = None; warn = ""
         else:
             path = os.path.join(RS_DIR, name + ".json"); fmt = "source"
-            cnt = f"{_build_source(url, path)} 条域名"
+            count, ip_only = _build_source(url, path)
+            warn = ("\n⚠️ 纯 IP 规则集: 本网关按域名(SNI)分流, IP 规则基本不会命中 "
+                    "(Telegram App 等也走不了)。" if ip_only else "")
     except Exception as e:  # noqa: BLE001
         return False, f"下载/解析失败: {e}"
 
@@ -266,8 +273,10 @@ def add_ruleset(url, target):
         cc["route"]["rules"].insert(idx, {"rule_set": name, "outbound": target})
     ok, msg = apply_sb(mod)
     if ok:
-        m = _rs_meta(); m[name] = {"url": url, "outbound": target, "format": fmt, "path": path}; _save_rs_meta(m)
-        return True, f"规则集已添加 → {target}（{cnt}，{name}）"
+        m = _rs_meta(); m[name] = {"url": url, "outbound": target, "format": fmt,
+                                   "path": path, "count": count}; _save_rs_meta(m)
+        cntdesc = f"{count} 条" if count is not None else "sing-box .srs"
+        return True, f"规则集已添加 → {target}（{cntdesc}，{name}）" + warn
     return False, msg
 
 def del_ruleset(name):
@@ -294,13 +303,30 @@ def refresh_rulesets():
             if info.get("format") == "binary":
                 open(info["path"], "wb").write(_fetch_bytes(info["url"]))
             else:
-                _build_source(info["url"], info["path"])
+                info["count"] = _build_source(info["url"], info["path"])[0]
             n += 1
         except Exception as e:  # noqa: BLE001
             print("refresh rs", name, e)
     if m:
-        sh(["systemctl", "restart", "sing-box"])
+        _save_rs_meta(m); sh(["systemctl", "restart", "sing-box"])
     return n
+
+def test_exits():
+    """对每个代理出口做 JP→落地的 TCP 握手, 测连通+延迟。"""
+    obs = proxy_outbounds(load())
+    if not obs:
+        return "(无代理出口)"
+    lines = []
+    for o in obs:
+        host = o.get("server"); port = int(o.get("server_port", 0) or 0)
+        try:
+            t0 = time.monotonic()
+            with socket.create_connection((host, port), timeout=5):
+                ms = int((time.monotonic() - t0) * 1000)
+            lines.append(f"✅ <b>{o['tag']}</b>  {ms}ms  ({o['type']} {host}:{port})")
+        except Exception:  # noqa: BLE001
+            lines.append(f"❌ <b>{o['tag']}</b>  不通  ({host}:{port})")
+    return "出口连通/延迟 (JP→落地 TCP 握手):\n" + "\n".join(lines)
 
 # ── 单条规则增删 ──
 def add_rule(domain, target):
@@ -387,6 +413,8 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, status_text(), MENU); return
     if data == "status":
         edit(chat, mid, status_text(), MENU); return
+    if data == "test":
+        edit(chat, mid, "测试中…", None); edit(chat, mid, test_exits(), BACK); return
     if data == "exits":
         edit(chat, mid, exits_text(), BACK); return
     if data == "rules":
@@ -447,6 +475,8 @@ def handle_text(chat, text):
         state.pop(chat, None); send(chat, status_text()); return
     if text.startswith("/"):
         cmd = text.split()[0]
+        if cmd == "/test":
+            send_plain(chat, "测试中…"); send_plain(chat, test_exits()); return
         if cmd == "/exits":
             send(chat, exits_text(), BACK); return
         if cmd == "/rules":
