@@ -43,7 +43,7 @@ git clone https://github.com/misaka-cpu/privdns-gateway.git
 cd privdns-gateway && sudo ./install.sh
 ```
 
-脚本会装好 mosdns、sing-box(1.12)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 bot token、你的 TG id、DoT 域名。域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。详见 [docs/INSTALL.md](docs/INSTALL.md)。
+脚本会装好 mosdns、sing-box(1.12)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。详见 [docs/INSTALL.md](docs/INSTALL.md)。
 
 卸载:`sudo ./uninstall.sh`(加 `--purge` 连配置一起删)。
 

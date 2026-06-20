@@ -99,12 +99,12 @@ fi
 BOT_TOKEN="${PDG_BOT_TOKEN:-}"; ALLOWED_IDS="${PDG_ALLOWED:-}"; DOT_DOMAIN="${PDG_DOT_DOMAIN:-}"
 if [[ -z "$NONINT" ]]; then
   echo
-  [[ -n "$BOT_TOKEN"   ]] || read -rp "Telegram bot token: " BOT_TOKEN
-  [[ -n "$ALLOWED_IDS" ]] || read -rp "你的 Telegram user id (只允许它管理): " ALLOWED_IDS
-  [[ -n "$DOT_DOMAIN"  ]] || read -rp "DoT 域名 (如 dot.example.com): " DOT_DOMAIN
+  [[ -n "$BOT_TOKEN" ]] || read -rp "Telegram bot token (可留空, 装完用 sudo pdg-set-token 再设): " BOT_TOKEN
+  if [[ -n "$BOT_TOKEN" && -z "$ALLOWED_IDS" ]]; then read -rp "你的 Telegram user id (只允许它管理): " ALLOWED_IDS; fi
+  [[ -n "$DOT_DOMAIN" ]] || read -rp "DoT 域名 (如 dot.example.com): " DOT_DOMAIN
 fi
-[[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" && -n "$DOT_DOMAIN" ]] \
-  || die "token / user id / 域名 不能为空 (非交互请用 PDG_BOT_TOKEN/PDG_ALLOWED/PDG_DOT_DOMAIN)"
+[[ -n "$DOT_DOMAIN" ]] || die "DoT 域名不能为空 (非交互请用 PDG_DOT_DOMAIN)"
+# token / user id 可留空 → 装完先不启 bot, 之后 sudo pdg-set-token 补
 
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
@@ -118,6 +118,7 @@ install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh   /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh       /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
+install -m755 "$REPO_DIR"/deploy/bot/pdg-set-token.sh                     /usr/local/bin/pdg-set-token
 : > /etc/mosdns/rules/custom_direct.txt
 
 render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNAL_CIDR|g" \
@@ -195,8 +196,13 @@ fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-systemctl enable --now mosdns sing-box pdg-bot pdg-probe81 >/dev/null 2>&1 || true
+systemctl enable --now mosdns sing-box pdg-probe81 >/dev/null 2>&1 || true
 systemctl enable --now pdg-rules-update.timer >/dev/null 2>&1 || true
+if [[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" ]]; then
+  systemctl enable --now pdg-bot >/dev/null 2>&1 || true
+else
+  systemctl enable pdg-bot >/dev/null 2>&1 || true   # 开机自启; 现在没 token 暂不启动, 用 pdg-set-token 设置后启用
+fi
 printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\n' > /etc/resolv.conf
 
 # ── 9. 防火墙 ──
@@ -207,11 +213,14 @@ nft -f /etc/nftables.conf
 # ── 10. 体检 ──
 echo; c_g "安装完成。状态:"
 for s in mosdns sing-box pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
+if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
+  echo; c_y "管理 bot 未启用(没填 token)。设置并启用:  sudo pdg-set-token"
+fi
 cat <<EOF
 
 下一步:
   1) 手机【私密 DNS / DoT】填:  $DOT_DOMAIN
-  2) Telegram 给你的 bot 发 /start, 然后:
+  $( [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]] && echo "2) 启用管理 bot:  sudo pdg-set-token  (之后再发 /start)" || echo "2) Telegram 给你的 bot 发 /start, 然后:" )
        • 「📤 出口管理 → 添加」粘贴 ss:// / vmess:// / trojan:// / vless:// 落地节点
        • 「📑 分流管理」按需把域名/规则集指到出口 (默认其余国际走 jp 直出)
   3) iOS 用户: bot「📱 客户端 → iOS 描述文件」, 装上即可(蜂窝探测 :81 已就绪)
