@@ -86,7 +86,7 @@ def tg_download(file_id):
 
 # 一级菜单: 只放常用诊断 + 4 个分类入口 (展开二级, 避免一屏按钮看花眼)
 MENU = {"inline_keyboard": [
-    [{"text": "📊 状态", "callback_data": "status"}, {"text": "🩺 自检", "callback_data": "doctor"}],
+    [{"text": "🔄 更新", "callback_data": "upd_check"}, {"text": "🩺 自检", "callback_data": "doctor"}],
     [{"text": "🚦 测出口", "callback_data": "test"}, {"text": "📈 流量", "callback_data": "traffic"}],
     [{"text": "📤 出口管理", "callback_data": "nav:exit"}, {"text": "📑 分流管理", "callback_data": "nav:rule"}],
     [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
@@ -602,6 +602,38 @@ def doctor_text():
     return (f"🩺 <b>自检</b> — {head}  ({nf} 失败 / {nw} 警告 / 共 {len(results)})\n\n"
             + "\n".join(lines) + tip)
 
+# ── 更新(检查 → 确认 → 后台执行)──
+PDG_REPO = "/opt/privdns-gateway"
+
+def _esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _git(*args, t=60):
+    return subprocess.run(["git", "-C", PDG_REPO, *args], capture_output=True, text=True, timeout=t)
+
+def update_check():
+    """git fetch + 列 HEAD..origin/main 待更新提交。返回 (有更新?, 文本)。"""
+    try:
+        _git("fetch", "-q", "origin", "main")
+        cur = _git("rev-parse", "--short", "HEAD").stdout.strip()
+        log = _git("log", "--oneline", "HEAD..origin/main").stdout.strip()
+    except Exception as e:  # noqa: BLE001
+        return False, f"检查更新失败: {e}"
+    if not log:
+        return False, f"🟢 已是最新版本(当前 <code>{cur}</code>)。"
+    n = len(log.splitlines())
+    return True, (f"🔄 有 <b>{n}</b> 个待更新提交(当前 <code>{cur}</code>):\n"
+                  f"<pre>{_esc(log)}</pre>\n确认后在后台执行 pdg update(约 30-60 秒, bot 会自动重启回来)。")
+
+def start_update():
+    """在独立的 systemd 瞬时单元里跑 pdg update, 不受 pdg-bot 自身重启影响。"""
+    try:
+        r = subprocess.run(["systemd-run", "--collect", "/usr/local/bin/pdg", "update"],
+                           capture_output=True, text=True, timeout=15)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
 # ── 单条规则增删 ──
 def add_rule(domain, target):
     domain = domain.strip().lstrip(".").lower()
@@ -981,6 +1013,17 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "测试中…", None); edit(chat, mid, test_exits(), BACK); return
     if data == "doctor":
         edit(chat, mid, "🩺 自检中(几秒)…", None); edit(chat, mid, doctor_text(), BACK); return
+    if data == "upd_check":
+        edit(chat, mid, "🔄 检查更新中…", None)
+        has, txt = update_check()
+        kb = ({"inline_keyboard": [[{"text": "✅ 确认更新", "callback_data": "upd_apply"}],
+                                   [{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]} if has else BACK)
+        edit(chat, mid, txt, kb); return
+    if data == "upd_apply":
+        ok = start_update()
+        edit(chat, mid, ("🚀 已开始后台更新, 约 30-60 秒后 bot 自动回来(期间可能短暂无响应)。\n"
+                         "完成后点「🩺 自检」确认。" if ok
+                         else "❌ 启动更新失败, 请在终端跑 sudo pdg update。"), BACK); return
     if data == "traffic":
         edit(chat, mid, traffic_text(), BACK); return
     if data == "exits":
