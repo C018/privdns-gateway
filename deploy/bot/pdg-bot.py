@@ -117,8 +117,11 @@ def _nav(key):
     return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
 
 def send(chat, text, kb=None):
-    post("sendMessage", {"chat_id": chat, "text": text, "parse_mode": "HTML",
-                         "reply_markup": kb or MENU, "disable_web_page_preview": True})
+    p = {"chat_id": chat, "text": text, "parse_mode": "HTML",
+         "reply_markup": kb or MENU, "disable_web_page_preview": True}
+    if not post("sendMessage", p).get("ok"):
+        p.pop("parse_mode", None)   # HTML 解析失败(文本含 < & 等, 如 sing-box 报错)→ 退回纯文本, 保证消息+键盘送达
+        post("sendMessage", p)
 
 def send_plain(chat, text):
     """纯文本回复, 不挂任何键盘 (操作结果/确认用, 避免每次刷出整排菜单)。"""
@@ -126,10 +129,14 @@ def send_plain(chat, text):
                          "disable_web_page_preview": True})
 
 def edit(chat, mid, text, kb=None):
-    r = post("editMessageText", {"chat_id": chat, "message_id": mid, "text": text, "parse_mode": "HTML",
-                                 "reply_markup": kb or MENU, "disable_web_page_preview": True})
-    if not r.get("ok"):
-        send(chat, text, kb)
+    p = {"chat_id": chat, "message_id": mid, "text": text, "parse_mode": "HTML",
+         "reply_markup": kb or MENU, "disable_web_page_preview": True}
+    if post("editMessageText", p).get("ok"):
+        return
+    p.pop("parse_mode", None)        # 先退回纯文本重试编辑(原地保留键盘)
+    if post("editMessageText", p).get("ok"):
+        return
+    send(chat, text, kb)             # 仍不行(如消息已删)再发新消息
 
 def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
