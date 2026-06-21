@@ -816,8 +816,7 @@ def del_rule_kb(chat):
             continue
         rows.append([{"text": ("☑️ " if d in sel else "⬜️ ") + lbl, "callback_data": "dtog:" + d}])
     rows.append([{"text": f"✅ 确认删除 ({len(sel)})", "callback_data": "ddel"}])
-    rows.append([{"text": "✍️ 手动输入", "callback_data": "del_rule_manual"},
-                 {"text": "⬅️ 返回主菜单", "callback_data": "menu"}])
+    rows.append([{"text": "⬅️ 返回主菜单", "callback_data": "menu"}])
     return items, {"inline_keyboard": rows}
 
 # ── 改分流规则出口 / 出口排序 / 改故障组 ──
@@ -1304,9 +1303,6 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, f"⏳ 正在删除 {len(doms)} 个域名并重启 sing-box…", None)
         ok, msg = del_rules_bulk(doms); del_sel.pop(chat, None)
         edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
-    if data == "del_rule_manual":
-        state[chat] = "del_rule"
-        edit(chat, mid, "发要删除的域名，例 <code>netflix.com</code>。/cancel 取消。", BACK); return
     if data == "testdom":
         state[chat] = "test_dom"
         edit(chat, mid, "发个域名, 查它走哪个出口/规则(还是国内直连)。\n例: <code>netflix.com</code>\n/cancel 取消。", BACK); return
