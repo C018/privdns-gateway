@@ -41,6 +41,32 @@ jobs:
             echo "  OK"
           done
 
+      - name: mobileconfig 模板是合法 plist/XML
+        run: |
+          python3 - <<'PY'
+          import plistlib, glob, sys
+          ok = True
+          for f in glob.glob("deploy/ios/*.mobileconfig.tmpl"):
+              try:
+                  plistlib.load(open(f, "rb")); print("  OK", f)
+              except Exception as e:
+                  print("  FAIL", f, e); ok = False
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: systemd unit 静态检查 (best-effort, 不阻断)
+        continue-on-error: true
+        run: |
+          if command -v systemd-analyze >/dev/null; then
+            systemd-analyze verify \
+              deploy/bot/pdg-bot.service deploy/bot/pdg-health.service \
+              deploy/bot/pdg-rules-update.service deploy/bot/pdg-health.timer \
+              deploy/bot/pdg-rules-update.timer deploy/ios/pdg-probe81.service || true
+            echo "(CI 环境缺二进制/路径, 上面的告警多为预期; 重点看指令拼写/语法错)"
+          else
+            echo "systemd-analyze 不可用, 跳过"
+          fi
+
       - name: ShellCheck (有则跑, 无则给安装提示; 仅提示不阻断)
         continue-on-error: true
         run: |
