@@ -102,7 +102,11 @@ fi
 BOT_TOKEN="${PDG_BOT_TOKEN:-}"; ALLOWED_IDS="${PDG_ALLOWED:-}"; DOT_DOMAIN="${PDG_DOT_DOMAIN:-}"
 if [[ -z "$NONINT" ]]; then
   echo
-  [[ -n "$BOT_TOKEN" ]] || read -rp "Telegram bot token (可留空, 装完用 sudo pdg-set-token 再设): " BOT_TOKEN
+  if [[ -z "$BOT_TOKEN" ]]; then
+    c_y "提示: 出口(落地节点)和分流规则都在 Telegram bot 里设置。不填 token 也能装完,"
+    c_y "      但要等之后 sudo pdg-set-token 设好 token、给 bot 发 /start 才能配代理。"
+    read -rp "Telegram bot token (可留空): " BOT_TOKEN
+  fi
   if [[ -n "$BOT_TOKEN" && -z "$ALLOWED_IDS" ]]; then read -rp "你的 Telegram user id (只允许它管理): " ALLOWED_IDS; fi
   [[ -n "$DOT_DOMAIN" ]] || read -rp "DoT 域名 (如 dot.example.com): " DOT_DOMAIN
 fi
@@ -233,7 +237,8 @@ nft -f /etc/nftables.conf
 echo; c_g "安装完成。状态:"
 for s in mosdns sing-box pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
-  echo; c_y "管理 bot 未启用(没填 token)。设置并启用:  sudo pdg-set-token"
+  echo; c_y "⚠️ 管理 bot 未启用(没填 token)。出口和分流规则都在 bot 里设——"
+  c_y "   现在还没法配代理。先跑:  sudo pdg-set-token  设好 token, 再给 bot 发 /start。"
 fi
 cat <<EOF
 
