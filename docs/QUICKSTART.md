@@ -31,7 +31,7 @@ VPS 用的是 **kfchost**:
 - **Cloudflare**:务必用「**仅 DNS / 灰云**」,不要开橙云代理。
 - 等生效:`dig +short dot.example.com` 能返回你的 IP 再继续。
 
-![DNS 控制台加 A 记录](images/dns.png)
+![DNS 控制台加 A 记录](images/dns.svg)
 *在域名控制台把子域 A 记录指向 VPS 公网 IP*
 
 ---
@@ -45,7 +45,7 @@ VPS 用的是 **kfchost**:
 
 登录 [kfchost 控制台](https://kfchost.com/center/) → 打开你的 VPS → 下方「**增值服务 → 5GPN**」→「**生成链接**」→「**打开门户**」(浏览器跳到 5GPN 网站)。
 
-![kfchost 5GPN 生成链接](images/5gpn-portal.png)
+![kfchost 5GPN 生成链接](images/5gpn-portal.svg)
 *kfchost 控制台:增值服务 → 5GPN → 生成链接 → 打开门户*
 
 > ⚠️ 仅限**浙江(杭州)联通手机卡**;开通约**工作日 3 小时**内完成,非工作日顺延。
@@ -58,7 +58,7 @@ VPS 用的是 **kfchost**:
 4. **外站绑定**:门户里会看到 kfchost 传来的 VPS 加速目标,**确认绑定**(状态变「已生效」)。
 5. **专网检测**:用这张联通卡的 **5G 网络**(关 WiFi)打开门户,确认显示「专网内」。
 
-![5GPN 门户:手机号绑定 + 外站绑定](images/5gpn-bind.png)
+![5GPN 门户:手机号绑定 + 外站绑定](images/5gpn-bind.svg)
 *5GPN 客户门户:手机号绑定 / 外站绑定(VPS)/ 专网检测*
 
 > 绑定生效后,手机走这张卡的流量才会以固定专网内网 IP 到达 VPS——这是后面分流能生效的前提。
@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 2. 让你填 **bot token / 你的 user id / DoT 域名**(token 可留空,装完再设)。
 3. 确认 A 记录生效后自动签 Let's Encrypt 证书,起服务、应用防火墙。
 
-![安装过程](images/install.png)
+![安装过程](images/install.svg)
 *install.sh 运行过程*
 
 > 抓内网卡段那步若没抓到:先随便填(如 `172.22.0.0/16`),装完用 `sudo pdg detect-cidr` 从容重测并写回。
@@ -118,19 +118,19 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 
 Telegram 给 bot 发 `/start`,出现主菜单:
 
-![bot 主菜单](images/bot-menu.png)
+![bot 主菜单](images/bot-menu.svg)
 *bot `/start` 主菜单*
 
 - **📤 出口管理 → ➕ 添加**:粘贴你的落地节点链接(`ss:// / vmess:// / trojan:// / vless://`)。
-  ![添加出口](images/add-exit.png)
+  ![添加出口](images/add-exit.svg)
   *粘贴落地节点链接添加出口*
 
 - **📑 分流管理**:把域名或规则集指到某个出口;不指的默认走「其余国际」的默认出口。
-  ![分流管理](images/rules.png)
+  ![分流管理](images/rules.svg)
   *把域名/规则集指到出口*
 
 - **🚦 测出口**:看各出口的延迟、是否可用。
-  ![测出口](images/test.png)
+  ![测出口](images/test.svg)
   *测各出口延迟*
 
 ---
@@ -139,7 +139,7 @@ Telegram 给 bot 发 `/start`,出现主菜单:
 
 VPS 上 `sudo pdg` 进管理菜单(状态 / 自检 / 更新 / 快照回滚 / 换 token / 日志 / 流量 / 识别内网卡段 / 卸载):
 
-![pdg 管理菜单](images/pdg-menu.png)
+![pdg 管理菜单](images/pdg-menu.svg)
 *`sudo pdg` 管理菜单*
 
 常用:
