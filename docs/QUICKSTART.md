@@ -103,13 +103,13 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 
 **Android**:设置 → 网络和互联网 → **私人 DNS** → 选「指定主机名」→ 填你的域名 `dot.example.com`。
 
-![Android 私人 DNS](images/android-dns.png)
+![Android 私人 DNS](images/android-dns.svg)
 *Android 私人 DNS 填域名*
 
 **iOS**:Telegram 给 bot 发 `/start` → **📱 客户端 → iOS 描述文件**,存到「文件」App 再去 设置→通用→描述文件 安装;
 不用 bot 也行,VPS 上跑 `sudo pdg ios` 直接出二维码,手机(走这张 SIM)扫码安装。
 
-![iOS 描述文件](images/ios-profile.png)
+![iOS 描述文件](images/ios-profile.svg)
 *iOS 安装描述文件 / 扫码*
 
 ---
