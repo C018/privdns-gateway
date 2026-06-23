@@ -2,6 +2,16 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-06-24 — 流媒体/服务解锁开关(WDA)
+
+- **bot『🌐 DNS 上游』新增解锁开关**:两个按钮在「🛬 解锁走落地出口」与「🔓 解锁走 WDA」之间整体切换。
+  - 🔓 WDA:一批可解锁的服务域名(Netflix/Disney+/Prime/AppleTV/YouTube/Dazn/U-NEXT/iQiyi/TVBAnywhere/DMM + OpenAI/Claude/Gemini + Steam 等)整体 → **jp 直出**(从 VPS 被授权 IP 出)+ 经 mosdns 用**解锁 DNS `22.22.22.22`** 解析到中继。其余流量照常分流。
+  - 🛬 落地:撤掉规则,这些域名回落各自现有出口(hk/tw)。
+- **mosdns 加常驻"解锁支"**(平时休眠):`unlock_upstream`(22.22.22.22, concurrent 1) + `geosite_unlock`(读 `unlock.txt`) + main_sequence 一条「**本机查询**命中解锁域名 → 解锁 DNS」的支(带 `jump has_resp`,否则答案会被 `remote_upstream` 覆盖——实测踩过)。只对 sing-box 直出的本机查询生效,手机劫持路径不变。
+- **旧装自动迁移** `migrate_mosdns_unlock`(随管理类 pdg 命令幂等补该支);install 建空 `unlock.txt`(空=休眠,不改现有行为)。
+- **测试**:dns-policy-test 加「解锁域名经本机 → 解锁 DNS(非普通上游)」断言,正好回归 `jump has_resp`。
+- 说明:解锁地区取决于厂商面板选的平台(VPS 在日本→JP 平台→日本区);解锁的价值在于**中继是干净 IP**,避开 Netflix 对机房 IP 的代理封锁。
+
 ## 2026-06-23 — 评审第九轮:concurrent 也给旧装自动迁移 + 单上游不重复查
 
 - **旧装升级自动补 `concurrent`**:`pdg update` 不重渲染 `/etc/mosdns/config.yaml`,旧装升上来仍是默认随机单上游、无故障转移。新增 `migrate_mosdns_concurrent`(随管理类 `pdg` 命令幂等触发):只给**缺 concurrent** 的 forward 块补该字段、**不动用户现有上游**;备份 `cmp` 校验、重启 mosdns 失败自动还原。

@@ -184,6 +184,53 @@ migrate_mosdns_concurrent(){
   fi
 }
 
+# 旧装迁移: 给 mosdns 补"WDA/流媒体解锁支"(常驻、平时休眠)。pdg update 不重渲染 config, 故在此幂等补。
+# 加 unlock_upstream(22.22.22.22) + geosite_unlock(读 unlock.txt) 两个插件 + main_sequence 一条
+# "本机查询命中解锁域名→解锁DNS"的支(带 jump has_resp 防被 remote_upstream 覆盖)+ 建空 unlock.txt。
+# 空 unlock.txt = 不命中任何域名 = 休眠, 不改变现有行为; bot『🔓 解锁走 WDA』开启时才填充。
+migrate_mosdns_unlock(){
+  local f=/etc/mosdns/config.yaml
+  [[ -f "$f" ]] || return 0
+  grep -q 'unlock_upstream' "$f" && return 0                   # 已有 → 跳过
+  grep -q 'tag: main_sequence' "$f" || return 0               # 不是本项目的 mosdns 配置 → 不动
+  c_g "给 mosdns 补 WDA 解锁支(常驻休眠, 不改现有行为)…"
+  local bak; bak="$f.preunlock.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "  备份失败, 中止。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  python3 - "$f" <<'PY' || { c_y "  生成失败, 中止(已留备份)。"; return 0; }
+import sys
+f=sys.argv[1]; s=open(f).read()
+plug='''  - tag: unlock_upstream
+    type: forward
+    args: { concurrent: 1, upstreams: [ {addr: "udp://22.22.22.22"} ] }
+  - tag: geosite_unlock
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/unlock.txt"] }
+  - tag: geosite_cn'''
+assert s.count('  - tag: geosite_cn')==1
+s=s.replace('  - tag: geosite_cn', plug, 1)
+old='''      - matches: client_ip $npn_clients
+        exec: goto internal_sequence
+      - exec: $remote_upstream'''
+new='''      - matches: client_ip $npn_clients
+        exec: goto internal_sequence
+      - matches: qname $geosite_unlock
+        exec: $unlock_upstream
+      - exec: jump has_resp
+      - exec: $remote_upstream'''
+assert old in s
+open(f,'w').write(s.replace(old,new,1))
+PY
+  [[ -e /etc/mosdns/rules/unlock.txt ]] || : > /etc/mosdns/rules/unlock.txt
+  systemctl restart mosdns 2>/dev/null; sleep 1
+  if [[ "$(systemctl is-active mosdns 2>/dev/null)" == active ]]; then
+    c_g "  ✅ 已补解锁支(休眠)。bot『🌐 DNS 上游→🔓 解锁走 WDA』可启用。"
+  else
+    c_y "  ⚠️ mosdns 重启失败 → 还原。"; cp -a "$bak" "$f" 2>/dev/null; systemctl restart mosdns 2>/dev/null
+  fi
+}
+
 SNAP_DIR="/var/lib/privdns-gateway/backups"
 
 cmd_snapshot(){
@@ -433,7 +480,7 @@ menu(){
 if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
-    *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true ;;   # 管理类命令才迁移
+    *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true ;;   # 管理类命令才迁移
   esac
 fi
 

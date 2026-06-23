@@ -405,6 +405,87 @@ def set_mosdns_upstream(which, addrs):
         return False, "mosdns 重启失败(配置可能不合法), 已回滚"
     return True, f"✅ {which} 上游已设为: {', '.join(addrs)}"
 
+# ── 流媒体/服务解锁: 在「落地出口」与「WDA 解锁」之间整体切换 ──
+# WDA 模式: 这些域名 → jp 直出 + 经 mosdns 用解锁 DNS(22.22.22.22)解析到中继(从本机授权 IP 出)。
+# 落地模式: 不加规则, 这些域名回落到各自现有分流出口(hk/tw 等)。
+# mosdns 侧的 unlock 支(unlock_upstream + geosite_unlock)是常驻的(install/迁移装好), 平时休眠;
+# 本函数只在 WDA 模式把域名清单写进 mosdns 的 unlock.txt 与 sing-box 的 rule_set, 并加 sing-box 路由规则。
+MOSDNS_RULES = "/etc/mosdns/rules"
+WDA_DOMAINS = [
+    # 流媒体
+    "netflix.com", "netflix.net", "nflxvideo.net", "nflximg.net", "nflxext.com", "nflxso.net",
+    "disneyplus.com", "disney-plus.net", "dssott.com", "bamgrid.com", "disneyplus.disney.co.jp",
+    "primevideo.com", "aiv-cdn.net", "aiv-delivery.net", "amazonvideo.com", "pv-cdn.net",
+    "tv.apple.com", "uts-api.itunes.apple.com", "play-edge.itunes.apple.com", "np-edge.itunes.apple.com",
+    "youtube.com", "googlevideo.com", "ytimg.com", "youtu.be", "youtubei.googleapis.com", "yt3.ggpht.com",
+    "dazn.com", "dazn-api.com", "indazn.com", "daznplayer.com",
+    "unext.jp", "nxtv.jp", "iq.com", "iqiyi.com", "qy.net",
+    "tvbanywhere.com", "mytvsuper.com", "dmm.com", "dmm.co.jp", "dmmapis.com",
+    # AI
+    "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
+    "anthropic.com", "claude.ai", "gemini.google.com", "generativelanguage.googleapis.com",
+    "aistudio.google.com", "meta.ai",
+    # 其它(WDA JP 平台支持)
+    "steampowered.com", "steamcommunity.com", "steamstatic.com", "play.google.com", "android.com",
+]
+
+def _wda_on(c=None):
+    c = c or load()
+    return any(r.get("rule_set") == "unlock" and r.get("outbound") == "jp"
+               for r in c.get("route", {}).get("rules", []))
+
+def _sync_unlock_domains():
+    """把 WDA_DOMAINS 写进 mosdns unlock.txt(domain: 前缀); 内容变了才重启 mosdns(失败回滚)。"""
+    try:
+        if "unlock_upstream" not in open(MOSDNS_CONF).read():
+            return False, "mosdns 还没有解锁支(unlock_upstream)。请先在服务器跑  sudo pdg update  补上再切。"
+    except OSError as e:
+        return False, f"读 mosdns 配置失败: {e}"
+    path = os.path.join(MOSDNS_RULES, "unlock.txt")
+    want = "".join("domain:%s\n" % d for d in WDA_DOMAINS)
+    try:
+        cur = open(path).read()
+    except OSError:
+        cur = None
+    if cur == want:
+        return True, ""
+    os.makedirs(MOSDNS_RULES, exist_ok=True)
+    if cur is not None:
+        shutil.copy(path, path + ".bak")
+    open(path, "w").write(want)
+    sh(["systemctl", "restart", "mosdns"]); time.sleep(1)
+    if sh(["systemctl", "is-active", "mosdns"]).stdout.strip() != "active":
+        if os.path.exists(path + ".bak"):
+            shutil.copy(path + ".bak", path)
+        sh(["systemctl", "restart", "mosdns"])
+        return False, "mosdns 重启失败, 已回滚 unlock.txt"
+    return True, ""
+
+def set_wda_mode(on):
+    if on:
+        ok, err = _sync_unlock_domains()
+        if not ok:
+            return False, err
+        os.makedirs(RS_DIR, exist_ok=True)
+        json.dump({"version": 1, "rules": [{"domain_suffix": WDA_DOMAINS}]},
+                  open(os.path.join(RS_DIR, "unlock.json"), "w"), ensure_ascii=False)
+    def mod(c):
+        c["route"].setdefault("rule_set", [])
+        c["route"]["rule_set"] = [r for r in c["route"]["rule_set"] if r.get("tag") != "unlock"]
+        c["route"]["rules"] = [r for r in c["route"]["rules"] if r.get("rule_set") != "unlock"]
+        if on:
+            c["route"]["rule_set"].append({"tag": "unlock", "type": "local", "format": "source",
+                                           "path": os.path.join(RS_DIR, "unlock.json")})
+            idx = 1 if c["route"]["rules"] and c["route"]["rules"][0].get("action") == "reject" else 0
+            c["route"]["rules"].insert(idx, {"rule_set": "unlock", "outbound": "jp"})
+    ok, msg = apply_sb(mod)
+    if not ok:
+        return False, msg
+    if on:
+        return True, ("✅ 已切到【🔓 WDA 解锁】: %d 个域名走 WDA(jp 直出 + 22.22.22.22 中继)。\n"
+                      "其余流量照常分流。哪个服务在 WDA 下不灵, 切回【落地出口】即可。") % len(WDA_DOMAINS)
+    return True, "✅ 已切到【🛬 落地出口】: 解锁域名回落到各自出口(hk/tw 等), 不走 WDA。"
+
 # ── TCP Fast Open ──
 def _tfo_on(c):
     obs = [o for o in c["outbounds"] if o.get("type") in PROXY_TYPES]
@@ -1415,12 +1496,22 @@ def handle_cb(chat, mid, data):
     if data == "dnsup":
         state[chat] = "set_dns"
         rem = _upstreams("remote"); loc = _upstreams("local")
+        mode = "🔓 WDA 解锁" if _wda_on() else "🛬 落地出口"
         edit(chat, mid, "🌐 <b>mosdns DNS 上游</b>\n"
              f"国际(remote): <code>{', '.join(rem) or '?'}</code>\n"
              f"国内(local): <code>{', '.join(loc) or '?'}</code>\n\n"
-             "改: 发「<b>remote 地址…</b>」或「<b>local 地址…</b>」(可多个, 空格分隔)\n"
-             "接 DNS 解锁: <code>remote udp://解锁DNS的IP:53</code>\n"
-             "恢复默认国际: <code>remote https://1.1.1.1/dns-query udp://8.8.8.8:53</code>\n/cancel 取消。", BACK); return
+             f"<b>流媒体/服务解锁</b>: 当前 <b>{mode}</b>\n"
+             "• 🛬 落地出口: 解锁服务走各自落地(hk/tw)\n"
+             "• 🔓 WDA: WDA 能解锁的整体走 WDA(jp 直出 + 解锁 DNS)\n\n"
+             "改上游: 发「<b>remote 地址…</b>」或「<b>local 地址…</b>」(空格分隔多个)\n/cancel 取消。",
+             {"inline_keyboard": [
+                 [{"text": "🛬 解锁走落地出口", "callback_data": "wda:off"},
+                  {"text": "🔓 解锁走 WDA", "callback_data": "wda:on"}],
+                 [{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}); return
+    if data in ("wda:on", "wda:off"):
+        edit(chat, mid, "正在切换解锁模式…", None)
+        ok, msg = set_wda_mode(data == "wda:on")
+        edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
     if data == "tfo":
         on = _tfo_on(load())
         edit(chat, mid, f"🚀 <b>TCP Fast Open</b>\n当前: <b>{'开启' if on else '关闭'}</b>\n"
