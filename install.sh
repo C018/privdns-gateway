@@ -12,10 +12,9 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/misaka-cpu/privdns-gateway.git"
-MOSDNS_VER="v5.3.4"
-SINGBOX_VER="1.12.9"          # 必须 1.12.x —— 1.13 移除了 sniff_override_destination, 本网关会失效
 CERT_DIR="/etc/mosdns/certs"
 NONINT="${PDG_NONINTERACTIVE:-}"
+# 二进制版本(MOSDNS_VER/SINGBOX_VER)+ 钉死 SHA256 来自 lib/versions.sh, 自举进仓库后 source(见下)
 
 c_g(){ echo -e "\033[1;32m[*]\033[0m $*"; }
 c_y(){ echo -e "\033[1;33m[!]\033[0m $*"; }
@@ -42,6 +41,48 @@ if [[ ! -f "$SRC/deploy/mosdns/config.yaml" ]]; then
 fi
 REPO_DIR="$SRC"
 
+# ── 版本 + 钉死 SHA256(供应链校验)──
+# shellcheck source=lib/versions.sh
+source "$REPO_DIR/lib/versions.sh"
+
+# ── 事务性安装: 失败自动回滚(只撤本次新装的, 不误伤既有可用部署)──
+INSTALL_OK=0; ROLLBACK_DONE=0
+PRIOR_INSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; RESOLVED_DISABLED=0
+[[ -f /opt/pdg-bot/bot.py || -x /usr/local/bin/pdg ]] && PRIOR_INSTALL=1
+
+rollback(){
+  set +e
+  [[ "$ROLLBACK_DONE" == 1 ]] && return; ROLLBACK_DONE=1
+  if [[ "$PRIOR_INSTALL" == 1 ]]; then
+    c_y "安装中途失败。检测到既有部署 → 不动它的服务/配置/二进制(避免误伤)。"
+    c_y "  当前运行的应仍是旧的可用版本。请跑  sudo pdg doctor  复查; 需要时  sudo pdg rollback。"
+    return
+  fi
+  c_y "安装失败 → 回滚本次全新安装的改动…"
+  systemctl disable --now pdg-bot pdg-probe81 mosdns sing-box \
+      pdg-rules-update.timer pdg-health.timer 2>/dev/null
+  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
+        /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
+        /etc/systemd/system/journald.conf.d/50-pdg.conf
+  systemctl daemon-reload 2>/dev/null
+  nft delete table inet pdg 2>/dev/null
+  rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /etc/privdns-gateway
+  rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
+  [[ "$MOSDNS_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mosdns
+  [[ "$SINGBOX_INSTALLED" == 1 ]] && rm -f /usr/local/bin/sing-box
+  # 还原系统级改动(仅全新安装才到这里)
+  if [[ -e /etc/nftables.conf.pdg-orig ]]; then
+    cp -a /etc/nftables.conf.pdg-orig /etc/nftables.conf 2>/dev/null
+    nft -f /etc/nftables.conf 2>/dev/null
+    rm -f /etc/nftables.conf.pdg-orig
+  fi
+  [[ "$RESOLVED_DISABLED" == 1 ]] && systemctl enable --now systemd-resolved 2>/dev/null
+  if [[ -e /etc/resolv.conf.pdg-orig ]]; then rm -f /etc/resolv.conf; mv /etc/resolv.conf.pdg-orig /etc/resolv.conf 2>/dev/null; fi
+  c_y "已回滚到安装前状态。修正问题后可重跑 install.sh。"
+}
+on_exit(){ local rc="$1"; [[ "$INSTALL_OK" == 1 || "$rc" == 0 ]] && return 0; rollback; }
+trap 'on_exit $?' EXIT
+
 # ── 1. 依赖 ──
 c_g "安装依赖…"
 export DEBIAN_FRONTEND=noninteractive
@@ -54,7 +95,10 @@ if ! command -v mosdns >/dev/null; then
   c_g "下载 mosdns $MOSDNS_VER ($MARCH)…"
   t=$(mktemp -d)
   curl -fsSL "https://github.com/IrineSistiana/mosdns/releases/download/${MOSDNS_VER}/mosdns-linux-${MARCH}.zip" -o "$t/m.zip"
+  pdg_verify_sha256 "$t/m.zip" "${PDG_SHA256[mosdns-$MARCH]:-}" "mosdns $MOSDNS_VER ($MARCH)" \
+    || { rm -rf "$t"; die "mosdns 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
   (cd "$t" && unzip -q m.zip && install -m755 mosdns /usr/local/bin/mosdns)
+  MOSDNS_INSTALLED=1
   rm -rf "$t"
 fi
 
@@ -63,8 +107,11 @@ if ! sing-box version 2>/dev/null | grep -q "version 1.12"; then
   c_g "下载 sing-box $SINGBOX_VER ($MARCH)…"
   t=$(mktemp -d)
   curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${MARCH}.tar.gz" -o "$t/sb.tgz"
+  pdg_verify_sha256 "$t/sb.tgz" "${PDG_SHA256[singbox-$MARCH]:-}" "sing-box $SINGBOX_VER ($MARCH)" \
+    || { rm -rf "$t"; die "sing-box 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
   tar -xzf "$t/sb.tgz" -C "$t"
   install -m755 "$t"/sing-box-*/sing-box /usr/local/bin/sing-box
+  SINGBOX_INSTALLED=1
   rm -rf "$t"
 fi
 
@@ -217,7 +264,7 @@ c_g "启动服务…"
 # 先备份原 resolv.conf(含符号链接), 供 uninstall 恢复
 [[ -e /etc/resolv.conf.pdg-orig ]] || cp -a /etc/resolv.conf /etc/resolv.conf.pdg-orig 2>/dev/null || true
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-  systemctl disable --now systemd-resolved 2>/dev/null || true
+  systemctl disable --now systemd-resolved 2>/dev/null && RESOLVED_DISABLED=1 || true
 fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
@@ -236,6 +283,7 @@ printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\n' > /etc/resolv.conf
 c_g "应用防火墙…"
 systemctl enable nftables >/dev/null 2>&1 || true
 nft -f /etc/nftables.conf
+INSTALL_OK=1   # 提交点: 至此核心已就绪, 后面只是打印, 不再触发回滚
 
 # ── 10. 自检 ──
 echo; c_g "安装完成。状态:"

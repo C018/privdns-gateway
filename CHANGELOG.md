@@ -2,6 +2,12 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-06-23 — 供应链/事务性/真功能测试(社区评审·可选项)
+
+- **二进制 SHA256 校验(供应链)**:`install.sh` 下载 mosdns / sing-box 后,先比对**钉死的官方 SHA256**(amd64+arm64)再安装,不符即 `die` 拒装。版本号与 4 个哈希集中到单一可信源 [lib/versions.sh](lib/versions.sh),`install.sh` 与功能测试共用。
+- **事务性安装·失败自动回滚**:`install.sh` 加 `trap … EXIT`,中途失败时——**全新安装**:停并清掉本次铺的单元/配置/二进制、`nft delete table inet pdg`、还原 `nftables.conf` / `resolv.conf` / `systemd-resolved` 到装前;**既有部署上升级失败**:不动其服务/配置/二进制(避免误伤),提示用 `pdg doctor` / `pdg rollback`。成功到防火墙应用后置"提交点",此后只剩打印、不再回滚。
+- **真功能测试(非静态)**:新增 [tests/functional-test.sh](tests/functional-test.sh)——真起 sing-box(direct 入口开 sniff,与生产同款),用 3 个本地 mock SOCKS5 当出口,按不同 **TLS SNI** 发 ClientHello,断言被嗅探并路由到正确出口(域名规则 + `final` 兜底)。纯本地、`python3` + 官方 sing-box(钉死 SHA256 下载),CI 新增 `functional` job 跑它。
+
 ## 2026-06-22 — 安全与健壮性加固(社区评审采纳)
 
 - **防火墙改独立表 `inet pdg`,不再 `flush ruleset`**:只 declare+delete 重建本表,不清掉 Docker / fail2ban / WireGuard 等其它表;install 备份原 `/etc/nftables.conf`、uninstall 删本表并还原。
