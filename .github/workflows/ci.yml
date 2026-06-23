@@ -77,9 +77,11 @@ jobs:
         run: bash tests/test-fw-migration.sh
 
   functional:
-    # 真功能测试: 下载钉死 SHA256 的 sing-box, 真起一遍, 验证「按 TLS SNI 分到不同出口」核心链路。
+    # 真功能测试: 下载钉死 SHA256 的 sing-box / mosdns, 真起一遍, 验证两层核心链路。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: 功能测试 (真起 sing-box 验证 SNI 分流 + final 兜底)
+      - name: 流量层 (真起 sing-box 验证按 SNI 分到不同出口 + final 兜底)
         run: bash tests/functional-test.sh
+      - name: DNS 层 (真起 mosdns 验证 A 劫持 / AAAA·HTTPS 置空 / 国内直连 / 按来源门控)
+        run: bash tests/dns-policy-test.sh

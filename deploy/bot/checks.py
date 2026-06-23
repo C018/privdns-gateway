@@ -198,11 +198,69 @@ def check_deep_hijack_note():
             f"A 劫持 / AAAA 抑制只对来源 {c} 生效; 本机 dig(源 127.0.0.1)走直连上游, "
             "无法复现劫持。端到端请用手机走内网卡实测。")
 
+# ── DNS 上游可观测性: 逐上游探测可达性/延迟 + 近 1h mosdns 上游错误计数 ──
+def _upstreams_of(tag):
+    """从 mosdns 配置里抽某个 forward 块的 upstream addr 列表。"""
+    m = re.search(r"- tag:\s*" + re.escape(tag) + r"\b(.*?)(?:\n\s*- tag:|\Z)", _mos(), re.S)
+    return re.findall(r'addr:\s*"([^"]+)"', m.group(1)) if m else []
+
+def _probe_upstream(addr):
+    """返回 (addr, 毫秒|None, 说明)。None=不可达。udp/tcp 发真实查询; https/tls 测可达。"""
+    import time, socket
+    t0 = time.monotonic()
+    ok = False; note = ""
+    try:
+        if addr.startswith(("udp://", "tcp://")):
+            hp = addr.split("://", 1)[1]; host, _, port = hp.partition(":"); port = port or "53"
+            args = ["dig", "+time=2", "+tries=1", "+short", "@" + host, "-p", port, "example.com", "A"]
+            if addr.startswith("tcp://"):
+                args.insert(1, "+tcp")
+            rc, out, _ = _run(args, t=4); ok = (rc == 0 and bool(out.strip()))
+        elif addr.startswith("https://"):
+            rc, out, _ = _run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "3", addr], t=5)
+            ok = out.strip() not in ("", "000")          # 有任何 HTTP 应答即可达(无 dns 参数会回 400)
+        elif addr.startswith("tls://"):
+            hp = addr.split("://", 1)[1]; host, _, port = hp.partition(":")
+            with socket.create_connection((host, int(port or 853)), timeout=3):
+                ok = True
+        else:
+            return (addr, None, "未知协议")
+    except Exception as e:  # noqa: BLE001
+        note = str(e)[:40]
+    ms = int((time.monotonic() - t0) * 1000)
+    return (addr, ms if ok else None, note or ("不可达/超时" if not ok else ""))
+
+def check_deep_upstreams():
+    rank = {"ok": 0, "warn": 1, "fail": 2}; level = "ok"; parts = []
+    for name, tag in (("国际remote", "remote_upstream"), ("国内local", "local_upstream")):
+        ups = _upstreams_of(tag)
+        if not ups:
+            parts.append(f"{name} 读不到配置"); level = max(level, "warn", key=rank.get); continue
+        oks = []; bad = []
+        for a in ups:
+            _, ms, msg = _probe_upstream(a)
+            (bad if ms is None else oks).append(f"{a} {msg}" if ms is None else (a, ms))
+        if not oks:
+            level = max(level, "fail", key=rank.get)
+            parts.append(f"{name} 0/{len(ups)} ❌ ({'; '.join(bad)})")
+        else:
+            slow = max(oks, key=lambda x: x[1])
+            seg = f"{name} {len(oks)}/{len(ups)} 最慢 {slow[0]} {slow[1]}ms"
+            if bad:
+                level = max(level, "warn", key=rank.get); seg += f" ⚠️挂:{'; '.join(bad)}"
+            parts.append(seg)
+    _, log, _ = _run(["journalctl", "-u", "mosdns", "--since", "-1h", "--no-pager", "-o", "cat"], t=8)
+    nerr = log.count("upstream error")
+    if nerr:
+        parts.append(f"近1h上游错误 {nerr} 次")
+        level = max(level, "warn", key=rank.get)
+    return (level, "DNS 上游探测", " ; ".join(parts))
+
 ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
        check_internal_cidr, check_nft, check_cert, check_dns, check_singbox_config]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
-        check_deep_clash, check_deep_hijack_note]  # pdg doctor --deep 追加
+        check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加
 
 def run(funcs=None):
     return [f() for f in (funcs or ALL)]

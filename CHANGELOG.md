@@ -2,6 +2,12 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-06-23 — 锦上添花:国内多厂商上游 / DNS 层功能测试 / 上游可观测
+
+- **国内上游默认多厂商冗余**:`local_upstream` 默认加 `udp://119.29.29.29:53`(腾讯),与阿里 DoH+UDP 一起,阿里抽风/限速时异厂商顶上。想换/加仍用 bot『🌐 DNS 上游』。
+- **DNS 层功能测试** [tests/dns-policy-test.sh](tests/dns-policy-test.sh)(并入 CI):真起 mosdns + 渲染真实 `config.yaml`,本地 mock 上游,断言「DNS as policy」核心——内网来源:代理域名 A 劫持到网关 IP、AAAA/HTTPS 置空、国内域名直连;**非内网来源不劫持**(按 `client_ip` 门控)。补上了此前只测流量层(SNI 分流)、DNS 层无测试的空白。
+- **DNS 上游可观测性**:`pdg doctor --deep` 新增「DNS 上游探测」——逐个上游测可达性/延迟(UDP/TCP 发真实查询、DoH/DoT 测连通)、报每组 N/M 与最慢者,并统计**近 1h mosdns 上游错误次数**;整组不可达记 fail、部分挂记 warn。
+
 ## 2026-06-23 — 评审第七轮:原装识别改严格白名单(默认拒绝),收口
 
 - **修漏检**:第六轮的语义判断只深查含 `dport` 的行,`ip saddr X accept` / `tcp accept` / `counter drop` 这类**不含 dport 的自定义规则会漏过**被当原装 → 迁移时静默删除。
