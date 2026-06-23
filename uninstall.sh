@@ -9,7 +9,21 @@ rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,pdg-rules-update,
       /etc/systemd/system/journald.conf.d/50-pdg.conf
 systemctl daemon-reload
 
-echo "已停止并移除 systemd 单元。防火墙规则仍在 /etc/nftables.conf — 如需恢复默认请自行处理。"
+# 防火墙: 删本项目独立表 inet pdg(不碰 Docker/fail2ban 等其它表); 有备份则还原 /etc/nftables.conf
+command -v nft >/dev/null 2>&1 && nft delete table inet pdg 2>/dev/null || true
+if [[ -e /etc/nftables.conf.pdg-orig ]]; then
+  mv -f /etc/nftables.conf.pdg-orig /etc/nftables.conf
+  nft -f /etc/nftables.conf 2>/dev/null || true
+fi
+# DNS: 还原 systemd-resolved 与 resolv.conf
+systemctl list-unit-files 2>/dev/null | grep -q '^systemd-resolved' && systemctl enable --now systemd-resolved 2>/dev/null || true
+if [[ -e /etc/resolv.conf.pdg-orig ]]; then
+  rm -f /etc/resolv.conf; mv /etc/resolv.conf.pdg-orig /etc/resolv.conf
+elif [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
+  ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+fi
+
+echo "已停止并移除 systemd 单元、防火墙表(inet pdg)、并尽量还原 DNS。"
 echo "保留: /etc/mosdns /etc/sing-box /opt/pdg-bot 与 Let's Encrypt 证书。"
 
 if [[ "${1:-}" == "--purge" ]]; then

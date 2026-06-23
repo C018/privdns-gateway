@@ -233,7 +233,7 @@ cmd_ios(){
 
   local SRV=""
   trap 'kill "$SRV" 2>/dev/null; nft -f /etc/nftables.conf 2>/dev/null; rm -rf "$WWW"; trap - INT TERM' INT TERM
-  nft insert rule inet filter input ip saddr "$CIDR" tcp dport "$PORT" accept 2>/dev/null
+  nft insert rule inet pdg input ip saddr "$CIDR" tcp dport "$PORT" accept 2>/dev/null
   ( cd "$WWW" && timeout 600 python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1 ) &
   SRV=$!
   qrencode -o /opt/pdg-bot/ios-qr.png "$URL" 2>/dev/null || true

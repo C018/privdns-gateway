@@ -104,14 +104,15 @@ def check_internal_cidr():
         return ("fail", "内网卡段", f"{c} 不是合法 CIDR")
     if net.prefixlen == 0:
         return ("fail", "内网卡段", f"{c} 等于全网, 会劫持所有来源!")
-    if not net.is_private:
+    cgnat = ipaddress.ip_network("100.64.0.0/10")   # 运营商 CGNAT(RFC 6598), py<3.13 的 is_private 不含它
+    if not (net.is_private or net.subnet_of(cgnat) or net == cgnat):
         return ("fail", "内网卡段", f"{c} 是公网段, 危险")
     if net.prefixlen < 12:
         return ("warn", "内网卡段", f"{c} 偏宽(/{net.prefixlen}), 建议收到内网卡精确 /16")
     return ("ok", "内网卡段", c)
 
 def check_nft():
-    _, out, _ = _run(["nft", "list", "chain", "inet", "filter", "input"])
+    _, out, _ = _run(["nft", "list", "chain", "inet", "pdg", "input"])
     if not out:
         return ("warn", "防火墙", "读不到 nftables")
     leaked = set()

@@ -2,6 +2,15 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-06-22 — 安全与健壮性加固(社区评审采纳)
+
+- **防火墙改独立表 `inet pdg`,不再 `flush ruleset`**:只 declare+delete 重建本表,不清掉 Docker / fail2ban / WireGuard 等其它表;install 备份原 `/etc/nftables.conf`、uninstall 删本表并还原。
+- **收紧凭据权限**:`/etc/sing-box` 改 700,`config.json` / `.botbak` / 写入临时文件统一 600(含出口密码、uuid)。
+- **规则集原子更新**:`refresh_rulesets` 改为 下临时文件 → 原子替换(留 .bak)→ `sing-box check` 通过才重启,坏档自动回滚、不重启,避免每日定时遇坏 `.srs` 断网。
+- **卸载更干净**:uninstall 还原 systemd-resolved 与 `resolv.conf`(install 已备份)。
+- **CI ShellCheck 改为阻断**(有 warning 即失败;systemd-analyze 仍 best-effort)。
+- **修 bug**:① CGNAT `100.64.0.0/10` 被 `is_private` 误判为"危险公网"(检测已支持却自检报错)——现显式放行;② `PDG_SKIP_CERT=1` 后经 bot 首次签证书缺账户注册参数——补 `--register-unsafely-without-email`。
+
 ## 2026-06-21 — bot 分流/出口编辑
 
 - **分流管理 → ✏️ 改出口**:选一条已有规则(域名组或规则集)直接改到别的出口,不用删了重加(同出口域名自动合并保持整洁)。

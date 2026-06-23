@@ -67,13 +67,8 @@ jobs:
             echo "systemd-analyze 不可用, 跳过"
           fi
 
-      - name: ShellCheck (有则跑, 无则给安装提示; 仅提示不阻断)
-        continue-on-error: true
+      - name: ShellCheck (阻断: 有 warning 即失败)
         run: |
-          if command -v shellcheck >/dev/null; then
-            shellcheck --severity=warning -e SC1091 \
-              install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh lib/*.sh
-          else
-            echo "shellcheck 未安装。本地可装: sudo apt-get install -y shellcheck"
-            echo "(GitHub ubuntu-latest 默认自带, 一般会跑到上面的分支)"
-          fi
+          command -v shellcheck >/dev/null || sudo apt-get install -y -q shellcheck
+          shellcheck --severity=warning -e SC1091 \
+            install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh lib/*.sh

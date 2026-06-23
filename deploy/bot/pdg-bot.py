@@ -177,10 +177,11 @@ def _write(c):
     t = SB + ".tmp"
     with open(t, "w") as f:
         json.dump(c, f, ensure_ascii=False, indent=2)
+    os.chmod(t, 0o600)        # config.json 含出口密码/uuid, 收紧到 600
     os.replace(t, SB)
 
 def apply_sb(modify):
-    shutil.copy(SB, SB + ".botbak")
+    shutil.copy(SB, SB + ".botbak"); os.chmod(SB + ".botbak", 0o600)
     c = load(); modify(c); _write(c)
     chk = sh(["sing-box", "check", "-c", SB])
     if chk.returncode != 0:
@@ -543,22 +544,51 @@ def del_ruleset(name):
     return False, msg
 
 def refresh_rulesets():
-    """重新下载并重建所有规则集 (供 bot 与定时任务调用; 无需 token)。"""
-    m = _rs_meta(); n = 0
+    """重下并原子替换所有规则集; sing-box check 通过才重启, 坏档自动回滚、不断网(供 bot 与每日定时调用)。"""
+    m = _rs_meta(); n = 0; swapped = []   # (path, bak)
     for name, info in m.items():
         # 兼容早期缺 format/path 的旧条目 (按 name 回填, 否则刷新会 KeyError)。
         info.setdefault("format", "binary" if str(info.get("path", "")).endswith(".srs") else "source")
         info.setdefault("path", os.path.join(RS_DIR, name + (".srs" if info["format"] == "binary" else ".json")))
+        tmp = info["path"] + ".new"
         try:
-            if info.get("format") == "binary":
-                open(info["path"], "wb").write(_fetch_bytes(info["url"]))
+            if info["format"] == "binary":
+                data = _fetch_bytes(info["url"])
+                if not data:
+                    raise ValueError("空响应")
+                open(tmp, "wb").write(data)
             else:
-                info["count"] = _build_source(info["url"], info["path"])[0]
+                info["count"] = _build_source(info["url"], tmp)[0]   # 先写临时文件
             n += 1
         except Exception as e:  # noqa: BLE001
             print("refresh rs", name, e)
-    if m:
-        _save_rs_meta(m); sh(["systemctl", "restart", "sing-box"])
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    # 原子替换(留 .bak 以便整体回滚)
+    for name, info in m.items():
+        tmp = info["path"] + ".new"
+        if not os.path.exists(tmp):
+            continue
+        if os.path.exists(info["path"]):
+            shutil.copy(info["path"], info["path"] + ".bak")
+            swapped.append((info["path"], info["path"] + ".bak"))
+        os.replace(tmp, info["path"])
+    if n == 0:
+        return 0
+    if sh(["sing-box", "check", "-c", SB]).returncode != 0:   # 坏档 → 回滚, 不重启(不断网)
+        for path, bak in swapped:
+            shutil.copy(bak, path)
+        print("refresh rs: sing-box check 失败, 已回滚, 不重启")
+        return 0
+    for _, bak in swapped:
+        try:
+            os.remove(bak)
+        except OSError:
+            pass
+    _save_rs_meta(m)
+    sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
     return n
 
 # ── 测出口 (端到端延迟, clash_api; TCP 兜底) ──
@@ -942,7 +972,7 @@ def set_dot_domain(domain):
     try:
         r = subprocess.run(
             ["certbot", "certonly", "--standalone", "-d", domain,
-             "--non-interactive", "--agree-tos", "--keep-until-expiring",
+             "--non-interactive", "--agree-tos", "--register-unsafely-without-email", "--keep-until-expiring",
              "--pre-hook", "/usr/local/bin/proxy-gateway-open-cert-http.sh",
              "--post-hook", "/usr/local/bin/proxy-gateway-restore-firewall.sh"],
             capture_output=True, text=True, timeout=300)

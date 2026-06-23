@@ -142,6 +142,8 @@ render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNA
 
 render "$REPO_DIR/deploy/mosdns/config.yaml"          > /etc/mosdns/config.yaml
 render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json
+chmod 700 /etc/sing-box; chmod 600 /etc/sing-box/config.json   # config 含出口密码/uuid
+[[ -e /etc/nftables.conf.pdg-orig ]] || cp -a /etc/nftables.conf /etc/nftables.conf.pdg-orig 2>/dev/null || true  # 供 uninstall 还原
 render "$REPO_DIR/deploy/firewall/nftables.conf"      > /etc/nftables.conf
 render "$REPO_DIR/deploy/bot/pdg-bot.service"         > /etc/systemd/system/pdg-bot.service
 chmod 644 /etc/systemd/system/pdg-bot.service        # 不再含 token (token 在 bot.env)
@@ -212,6 +214,8 @@ bash /opt/pdg-bot/update-rules.sh || c_y "geosite 下载失败, 装好后可在 
 # ── 8. 启动 ──
 c_g "启动服务…"
 # 释放 53 口: systemd-resolved 的 stub 占 127.0.0.53:53, 会和 mosdns 0.0.0.0:53 冲突
+# 先备份原 resolv.conf(含符号链接), 供 uninstall 恢复
+[[ -e /etc/resolv.conf.pdg-orig ]] || cp -a /etc/resolv.conf /etc/resolv.conf.pdg-orig 2>/dev/null || true
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
   systemctl disable --now systemd-resolved 2>/dev/null || true
 fi
