@@ -56,33 +56,41 @@ migrate_botenv(){
 }
 
 # 判断旧 /etc/nftables.conf 是不是本项目"原装"防火墙(无用户自定义)。
-# 语义判断(不挑排版: 单行/多行的 forward/output 链、不同年代的端口子集都算原装):
-# 任一不满足即"非原装"(宁可保守跳过、不静默重建丢规则):
-#   1) 除 inet filter 外还有别的 table(如 NAT)
-#   2) hook 不止 input/forward/output
-#   3) 出现 NAT 改写(dnat/snat/masquerade/redirect)
-#   4) 出现原装从不用的匹配/动作维度(daddr/sport/iifname/oifname/jump/goto/log/meta/mark/ether)
-#   5) 逐条 dport 规则越界: 限定来源行(saddr)来源须=内网段且端口⊆{53,80,81,443,853,8445};
-#      全网来源行(无 saddr)只允许 SSH 端口
+# 严格白名单(默认拒绝): 去注释/空行、收紧空白后, **每一行**都必须匹配下面某条已知原装规则;
+# 只要出现一行不认识的(自定义来源/端口/动作/链/表等)就判"非原装" → 不自动重建, 以免静默丢规则。
+# 白名单用正则, 因此兼容历史变体: forward/output 单行或多行写法、不同年代的内网端口子集
+# ({53,80,81,443} → +853 → +8445)都算原装。
 _fw_is_stock(){
-  local f="$1" port="$2" cidr="$3" body ln p pts
-  body="$(sed 's/#.*//' "$f")"                                   # 去注释(含整行/行内)
-  printf '%s\n' "$body" | grep -oE '\btable[[:space:]]+[a-z0-9]+[[:space:]]+[A-Za-z0-9_-]+' \
-    | grep -qvE '^table[[:space:]]+inet[[:space:]]+filter$' && return 1          # (1)
-  printf '%s\n' "$body" | grep -oE 'hook[[:space:]]+[a-z]+' \
-    | grep -qvE '^hook[[:space:]]+(input|forward|output)$' && return 1           # (2)
-  printf '%s\n' "$body" | grep -qiE '\b(dnat|snat|masquerade|redirect)\b' && return 1   # (3)
-  printf '%s\n' "$body" | grep -qiE '\b(daddr|sport|iifname|oifname|jump|goto|log|meta|mark|ether)\b' && return 1  # (4)
-  while IFS= read -r ln; do                                                      # (5)
-    printf '%s' "$ln" | grep -q 'dport' || continue
-    pts=$(printf '%s' "$ln" | grep -oE 'dport[[:space:]]*\{[^}]*\}|dport[[:space:]]+[0-9]+' | grep -oE '[0-9]+')
-    if printf '%s' "$ln" | grep -q 'saddr'; then
-      printf '%s' "$ln" | grep -oE 'saddr[[:space:]]+[0-9./]+' | awk '{print $2}' | grep -qvx "$cidr" && return 1
-      for p in $pts; do [[ " 53 80 81 443 853 8445 " == *" $p "* ]] || return 1; done
-    else
-      for p in $pts; do [[ "$p" == "$port" ]] || return 1; done
-    fi
-  done < <(printf '%s\n' "$body")
+  local f="$1" port="$2" cidr="$3" line norm matched pat
+  local cre="${cidr//./\\.}"               # 内网段做正则(转义点)
+  local pset='(53|80|81|443|853|8445)'     # 内网放行端口集(任意子集/顺序)
+  local -a pats=(
+    '^flush ruleset$'
+    '^table inet filter [{]$'
+    '^chain (input|forward|output) [{]$'
+    '^chain (forward|output) [{] type filter hook (forward|output) priority 0; policy accept; [}]$'
+    '^type filter hook input priority 0; policy drop;$'
+    '^type filter hook (forward|output) priority 0; policy accept;$'
+    '^iif "lo" accept$'
+    '^ct state established,related accept$'
+    "^tcp dport [{] ${port}(, 853)? [}] accept$"
+    "^tcp dport ${port} accept$"
+    "^ip saddr ${cre} tcp dport [{] ${pset}(, ${pset})* [}] accept$"
+    "^ip saddr ${cre} udp dport [{] (53|443)(, (53|443))* [}] accept$"
+    "^ip saddr ${cre} udp dport (53|443) accept$"
+    "^ip saddr ${cre} udp dport 443 reject$"
+    '^ip protocol icmp accept$'
+    '^ip6 nexthdr icmpv6 accept$'
+    '^[}]$'
+  )
+  while IFS= read -r line; do
+    norm="${line%%#*}"                                                  # 去行内/整行注释
+    norm="$(printf '%s' "$norm" | tr -s ' \t' ' ' | sed 's/^ //; s/ $//')"  # 收紧空白+去首尾
+    [[ -z "$norm" ]] && continue
+    matched=0
+    for pat in "${pats[@]}"; do printf '%s' "$norm" | grep -qE "$pat" && { matched=1; break; }; done
+    [[ "$matched" == 1 ]] || return 1                                   # 出现白名单外的行 → 非原装
+  done < "$f"
   return 0
 }
 
