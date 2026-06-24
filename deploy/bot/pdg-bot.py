@@ -484,6 +484,7 @@ def _write_unlock_file(domains):
     return True, ""
 
 def set_wda_mode(on):
+    was_on = _wda_on()                          # 记下操作前状态: 回滚要还原到它, 而不是无脑清空
     if on:
         if not _wda_authorized():               # 没授权就开 = 流媒体走 jp 直出但拿不到中继, 反而更糟 → 先拦住
             ip = _server_ip()
@@ -508,8 +509,8 @@ def set_wda_mode(on):
             c["route"]["rules"].insert(idx, {"rule_set": "unlock", "outbound": "jp"})
     ok, msg = apply_sb(mod)
     if not ok:
-        if on:
-            okc, errc = _write_unlock_file([])   # 回滚: sing-box 没开成, 把刚写满的 unlock.txt 清掉
+        if on and not was_on:                    # 仅"本来关→这次想开"失败才清回空; 本来就开则 apply_sb 已还原成带规则的旧配置, 保持 unlock.txt
+            okc, errc = _write_unlock_file([])
             if not okc:                          # 连回滚清空都失败 → 别静默, 明确告知 mosdns 侧可能残留
                 msg += "\n⚠️ 且回滚清空 unlock.txt 也失败(" + errc + "): mosdns 侧可能仍残留解锁清单, 请重试或手动清空。"
         return False, msg
