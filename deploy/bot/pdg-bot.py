@@ -1084,12 +1084,13 @@ def del_rule_kb(chat):
 # ── 改分流规则出口 / 出口排序 / 改故障组 ──
 def editable_rules(c):
     """可改出口的规则: [(索引, 简短标签)]。含域名规则与规则集规则。"""
-    out = []
+    out = []; meta = _rs_meta()
     for i, r in enumerate(c["route"]["rules"]):
         if "outbound" not in r:
             continue
         if r.get("rule_set"):
-            out.append((i, f'{r["outbound"]}: 规则集 {r["rule_set"]}'))
+            name = meta.get(r["rule_set"], {}).get("label") or r["rule_set"]   # 用显示名(改过名的), 没有才回退 rs_xxxx
+            out.append((i, f'{r["outbound"]}: 规则集 {name}'))
         else:
             doms = r.get("domain_suffix", []) + r.get("domain", [])
             if doms:
