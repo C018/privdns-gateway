@@ -93,16 +93,23 @@ MENU = {"inline_keyboard": [
     [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
 ]}
 BACK = {"inline_keyboard": [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
+EXIT_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回出口管理", "callback_data": "nav:exit"}],
+                                [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
+RULE_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回分流管理", "callback_data": "nav:rule"}],
+                                [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
 OPS_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}],
                                [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
 DNS_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回 DNS 上游", "callback_data": "dnsup"}],
                                [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
 
+def _back_rows(kb):
+    return [row[:] for row in kb["inline_keyboard"]]
+
 def _nav(key):
     """二级子菜单 (标题, 键盘)。每个子菜单末尾自带「返回主菜单」。"""
     subs = {
         "exit": ("📤 <b>出口管理</b> — 选一项:", [
-            [{"text": "📋 列表", "callback_data": "exits"}, {"text": "➕ 添加", "callback_data": "add_exit"},
+            [{"text": "📋 列表", "callback_data": "exit_list"}, {"text": "➕ 添加", "callback_data": "add_exit"},
              {"text": "🗑 删除", "callback_data": "del_exit"}],
             [{"text": "🎯 默认出口", "callback_data": "setfinal"}, {"text": "↕️ 出口排序", "callback_data": "order_exit"}],
             [{"text": "🔀 新建故障组", "callback_data": "add_grp"}, {"text": "✏️ 改故障组", "callback_data": "edit_grp"}]]),
@@ -1088,7 +1095,7 @@ def del_rules_bulk(domains):
         _write_direct([x for x in cur if x not in domains])   # 直连表改 mosdns 文件(与原 del_rule 一致, 不重启 mosdns)
     return True, f"✅ 已删除 {len(domains)} 个域名" + (f"(含直连 {len(hit)} 个)" if hit else "")
 
-def del_rule_kb(chat):
+def del_rule_kb(chat, back=RULE_BACK):
     """删规则多选键盘: 勾选/取消, 底部确认删除(N)。"""
     items = deletable_domains()
     valid = {d for d, _ in items}
@@ -1100,7 +1107,7 @@ def del_rule_kb(chat):
             continue
         rows.append([{"text": ("☑️ " if d in sel else "⬜️ ") + lbl, "callback_data": "dtog:" + d}])
     rows.append([{"text": f"✅ 确认删除 ({len(sel)})", "callback_data": "ddel"}])
-    rows.append([{"text": "⬅️ 返回主菜单", "callback_data": "menu"}])
+    rows.extend(_back_rows(back))
     return items, {"inline_keyboard": rows}
 
 # ── 改分流规则出口 / 出口排序 / 改故障组 ──
@@ -1502,15 +1509,15 @@ def rules_text():
         txt += "\n\n自定义直连: " + ", ".join(d[:20])
     return txt
 
-def kb_pick(prefix, tags):
+def kb_pick(prefix, tags, back=BACK):
     rows = [[{"text": t, "callback_data": f"{prefix}:{t}"}] for t in tags]
-    rows.append([{"text": "⬅️ 返回", "callback_data": "menu"}])
+    rows.extend(_back_rows(back))
     return {"inline_keyboard": rows}
 
-def kb_pick_named(prefix, items):
+def kb_pick_named(prefix, items, back=BACK):
     """items=[(value, 显示文字)]: 按钮显示文字, 回调用 value。"""
     rows = [[{"text": label, "callback_data": f"{prefix}:{value}"}] for value, label in items]
-    rows.append([{"text": "⬅️ 返回", "callback_data": "menu"}])
+    rows.extend(_back_rows(back))
     return {"inline_keyboard": rows}
 
 # ── 回调 (原地编辑) ──
@@ -1547,56 +1554,58 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, traffic_text(), BACK); return
     if data == "exits":
         edit(chat, mid, exits_text(), BACK); return
+    if data == "exit_list":
+        edit(chat, mid, exits_text(), EXIT_BACK); return
     if data == "rules":
-        edit(chat, mid, rules_text(), BACK); return
+        edit(chat, mid, rules_text(), RULE_BACK); return
     if data == "add_exit":
         state[chat] = "add_exit"
-        edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless://(含 reality) hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n/cancel 取消。", BACK); return
+        edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless://(含 reality) hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n/cancel 取消。", EXIT_BACK); return
     if data == "add_grp":
         state[chat] = "add_group"
         edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」建故障切换组(自动选最快/坏了自动切)。\n"
              f"可选成员: {', '.join(concrete_tags(load()))}\n例: <code>main hk tw us</code>\n"
-             "建好后可在「🎯 设默认出口」或规则里选它。/cancel 取消。", BACK); return
+             "建好后可在「🎯 设默认出口」或规则里选它。/cancel 取消。", EXIT_BACK); return
     if data == "add_rule":
         state[chat] = "add_rule"
-        edit(chat, mid, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>\n例: <code>netflix.com hk</code> / <code>x.cn direct</code>\n/cancel 取消。", BACK); return
+        edit(chat, mid, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>\n例: <code>netflix.com hk</code> / <code>x.cn direct</code>\n/cancel 取消。", RULE_BACK); return
     if data == "edit_rule":
         rs = editable_rules(load())
         if not rs:
-            edit(chat, mid, "暂无可改的分流规则", BACK); return
+            edit(chat, mid, "暂无可改的分流规则", RULE_BACK); return
         rows = [[{"text": lbl, "callback_data": f"er:{i}"}] for i, lbl in rs]
-        rows.append([{"text": "⬅️ 返回主菜单", "callback_data": "menu"}])
+        rows.extend(_back_rows(RULE_BACK))
         edit(chat, mid, "选要改出口的规则:", {"inline_keyboard": rows}); return
     if data.startswith("er:"):
         idx = data[3:]
         rows = [[{"text": t, "callback_data": f"ero:{idx}:{t}"}] for t in exit_tags(load())]
-        rows.append([{"text": "⬅️ 返回主菜单", "callback_data": "menu"}])
+        rows.extend(_back_rows(RULE_BACK))
         edit(chat, mid, "改到哪个出口:", {"inline_keyboard": rows}); return
     if data.startswith("ero:"):
         _, idx, target = data.split(":", 2)
-        ok, msg = reassign_rule(int(idx), target); edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
+        ok, msg = reassign_rule(int(idx), target); edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK); return
     if data == "order_exit":
         state[chat] = "order_exit"
         cur = [o["tag"] for o in load()["outbounds"]]
         edit(chat, mid, "发新的出口顺序(空格分隔, 含全部出口)。\n"
-             f"当前: <code>{' '.join(cur)}</code>\n例: <code>hk tw jp us auto</code>\n/cancel 取消。", BACK); return
+             f"当前: <code>{' '.join(cur)}</code>\n例: <code>hk tw jp us auto</code>\n/cancel 取消。", EXIT_BACK); return
     if data == "edit_grp":
         gs = urltest_groups(load())
         if not gs:
-            edit(chat, mid, "还没有故障组, 先用「🔀 新建故障组」建一个。", BACK); return
-        edit(chat, mid, "选要改的故障组:", kb_pick("egrp", gs)); return
+            edit(chat, mid, "还没有故障组, 先用「🔀 新建故障组」建一个。", EXIT_BACK); return
+        edit(chat, mid, "选要改的故障组:", kb_pick("egrp", gs, EXIT_BACK)); return
     if data.startswith("egrp:"):
         name = data[5:]; state[chat] = "edit_grp:" + name
         cur = next((o.get("outbounds", []) for o in load()["outbounds"]
                     if o.get("tag") == name and o.get("type") == "urltest"), [])
         edit(chat, mid, f"发 <b>{name}</b> 组的新成员(空格分隔, 按顺序, 至少2个)。\n"
              f"当前: <code>{' '.join(cur) or '空'}</code>\n可选: {', '.join(concrete_tags(load()))}\n"
-             f"例: <code>hk tw us</code>\n/cancel 取消。", BACK); return
+             f"例: <code>hk tw us</code>\n/cancel 取消。", EXIT_BACK); return
     if data == "del_rule":
         del_sel[chat] = set()
         items, kb = del_rule_kb(chat)
         if not items:
-            edit(chat, mid, "暂无可删的单域名规则(规则集请用「🗑 删规则集」)。", BACK); return
+            edit(chat, mid, "暂无可删的单域名规则(规则集请用「🗑 删规则集」)。", RULE_BACK); return
         edit(chat, mid, "勾选要删的域名(可多选), 选好点「✅ 确认删除」一次删:", kb); return
     if data.startswith("dtog:"):
         d = data[5:]; sel = del_sel.setdefault(chat, set())
@@ -1610,28 +1619,28 @@ def handle_cb(chat, mid, data):
             edit(chat, mid, "还没勾选域名。勾选后再点「✅ 确认删除」:", kb); return
         edit(chat, mid, f"⏳ 正在删除 {len(doms)} 个域名并重启 sing-box…", None)
         ok, msg = del_rules_bulk(doms); del_sel.pop(chat, None)
-        edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
+        edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK); return
     if data == "testdom":
         state[chat] = "test_dom"
-        edit(chat, mid, "发个域名, 查它走哪个出口/规则(还是国内直连)。\n例: <code>netflix.com</code>\n/cancel 取消。", BACK); return
+        edit(chat, mid, "发个域名, 查它走哪个出口/规则(还是国内直连)。\n例: <code>netflix.com</code>\n/cancel 取消。", RULE_BACK); return
     if data == "add_rs":
         state[chat] = "add_rs"
         edit(chat, mid, "发「<b>规则集URL 出口 [名称]</b>」(后缀 .list / .txt / .srs)。\n"
              f"出口: {', '.join(exit_tags(load()))}\n名称可留空(之后用「✏️ 改规则集名」改)。\n"
-             "例: <code>https://.../Binance.list tw 币安</code>\n/cancel 取消。", BACK); return
+             "例: <code>https://.../Binance.list tw 币安</code>\n/cancel 取消。", RULE_BACK); return
     if data == "del_rs":
         if not _rs_meta():
-            edit(chat, mid, "没有已添加的规则集", BACK); return
-        edit(chat, mid, "选择要删除的规则集：", kb_pick_named("delrs", _rs_items())); return
+            edit(chat, mid, "没有已添加的规则集", RULE_BACK); return
+        edit(chat, mid, "选择要删除的规则集：", kb_pick_named("delrs", _rs_items(), RULE_BACK)); return
     if data == "edit_rs":
         if not _rs_meta():
-            edit(chat, mid, "没有已添加的规则集", BACK); return
-        edit(chat, mid, "选择要改名的规则集：", kb_pick_named("ers", _rs_items())); return
+            edit(chat, mid, "没有已添加的规则集", RULE_BACK); return
+        edit(chat, mid, "选择要改名的规则集：", kb_pick_named("ers", _rs_items(), RULE_BACK)); return
     if data.startswith("ers:"):
         name = data[4:]; state[chat] = "rs_label:" + name
         cur = _rs_meta().get(name, {}).get("label") or name
         edit(chat, mid, f"发规则集 <code>{name}</code> 的新名称(显示用, 如 <b>币安</b> / <b>OpenAI</b>)。\n"
-             f"当前: {cur}\n发「-」清除自定义名。/cancel 取消。", BACK); return
+             f"当前: {cur}\n发「-」清除自定义名。/cancel 取消。", RULE_BACK); return
     if data == "tgexit":
         c = load(); cur = _tg_exit(c)
         rows = [[{"text": ("✓ " if t == cur else "") + t, "callback_data": "tgx:" + t}] for t in exit_tags(c)]
@@ -1649,9 +1658,9 @@ def handle_cb(chat, mid, data):
     if data == "del_exit":
         tags = deletable_tags(load())
         edit(chat, mid, "选择要删除的出口/故障组：" if tags else "没有可删的出口",
-             kb_pick("delx", tags) if tags else BACK); return
+             kb_pick("delx", tags, EXIT_BACK) if tags else EXIT_BACK); return
     if data == "setfinal":
-        edit(chat, mid, "「其余国际」默认走哪个出口/组：", kb_pick("fin", exit_tags(load()))); return
+        edit(chat, mid, "「其余国际」默认走哪个出口/组：", kb_pick("fin", exit_tags(load()), EXIT_BACK)); return
     if data == "ios":
         edit(chat, mid, "正在生成 iOS 描述文件…", None)
         try:
@@ -1729,13 +1738,13 @@ def handle_cb(chat, mid, data):
             if c["route"].get("final") not in live:
                 c["route"]["final"] = next((t for t in exit_tags(c)), "direct")
         ok, msg = apply_sb(mod)
-        edit(chat, mid, f"✅ 已删除 {tag}" if ok else msg, MENU); return
+        edit(chat, mid, f"✅ 已删除 {tag}" if ok else msg, EXIT_BACK); return
     if data.startswith("fin:"):
         tag = data[4:]
         ok, msg = apply_sb(lambda c: c["route"].__setitem__("final", tag))
-        edit(chat, mid, f"✅ 默认出口 → {tag}" if ok else msg, MENU); return
+        edit(chat, mid, f"✅ 默认出口 → {tag}" if ok else msg, EXIT_BACK); return
     if data.startswith("delrs:"):
-        ok, msg = del_ruleset(data[6:]); edit(chat, mid, ("✅ " if ok else "") + msg, MENU); return
+        ok, msg = del_ruleset(data[6:]); edit(chat, mid, ("✅ " if ok else "") + msg, RULE_BACK); return
 
 # ── 文本 ──
 def handle_text(chat, text):

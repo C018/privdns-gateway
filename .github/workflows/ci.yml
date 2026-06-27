@@ -88,6 +88,9 @@ jobs:
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
 
+      - name: "自检防火墙端口回归"
+        run: python3 tests/test-doctor-firewall.py
+
   functional:
     # 真功能测试: 下载钉死 SHA256 的 sing-box / mosdns, 真起一遍, 验证两层核心链路。
     runs-on: ubuntu-latest

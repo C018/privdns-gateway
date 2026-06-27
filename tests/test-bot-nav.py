@@ -17,3 +17,33 @@ assert 'edit(chat, mid, (f"✅ geosite 已更新; 规则集刷新 {n} 个" if r.
     "rule-update result path should stay covered"
 )
 assert '), OPS_BACK); return' in bot, "rule-update result must use OPS_BACK"
+
+
+def assert_near(marker: str, expected: str, message: str, window: int = 2000) -> None:
+    start = bot.find(marker)
+    assert start >= 0, f"missing marker: {marker}"
+    assert expected in bot[start:start + window], message
+
+
+assert "EXIT_BACK" in bot, "exit-management third-level screens should return to the exit submenu"
+assert "RULE_BACK" in bot, "rule-management third-level screens should return to the rule submenu"
+assert '"callback_data": "nav:exit"' in bot, "exit back keyboard should return to exit management"
+assert '"callback_data": "nav:rule"' in bot, "rule back keyboard should return to rule management"
+assert '"callback_data": "exit_list"' in bot, "exit submenu list should not reuse the main-level exits callback"
+assert_near('if data == "exit_list":', "EXIT_BACK", "exit list should return to exit management")
+assert_near('if data == "rules":', "RULE_BACK", "rule list should return to rule management")
+assert_near('if data == "add_exit":', "EXIT_BACK", "add-exit prompt should return to exit management")
+assert_near('if data == "add_grp":', "EXIT_BACK", "add-group prompt should return to exit management")
+assert_near('if data == "order_exit":', "EXIT_BACK", "exit ordering prompt should return to exit management")
+assert_near('if data.startswith("delx:"):', "EXIT_BACK", "exit deletion result should return to exit management")
+assert_near('if data.startswith("fin:"):', "EXIT_BACK", "default-exit result should return to exit management")
+assert_near('if data == "add_rule":', "RULE_BACK", "add-rule prompt should return to rule management")
+assert_near('if data == "edit_rule":', "RULE_BACK", "edit-rule selector should return to rule management")
+assert_near('if data.startswith("ero:"):', "RULE_BACK", "changing a rule outbound should return to rule management")
+assert_near('if data == "del_rule":', "RULE_BACK", "delete-rule selector should return to rule management")
+assert_near('if data == "ddel":', "RULE_BACK", "bulk domain deletion should return to rule management")
+assert_near('if data == "testdom":', "RULE_BACK", "test-domain prompt should return to rule management")
+assert_near('if data == "add_rs":', "RULE_BACK", "add-ruleset prompt should return to rule management")
+assert_near('if data == "del_rs":', "RULE_BACK", "delete-ruleset selector should return to rule management")
+assert_near('if data == "edit_rs":', "RULE_BACK", "rename-ruleset selector should return to rule management")
+assert_near('if data.startswith("delrs:"):', "RULE_BACK", "ruleset deletion result should return to rule management")

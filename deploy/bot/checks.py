@@ -126,10 +126,10 @@ def check_nft():
         m = re.search(r"dport\s*\{?\s*([0-9,\s]+)", s)
         if m:
             ports = {p.strip() for p in m.group(1).split(",") if p.strip().isdigit()}
-            leaked |= ports & {"53", "80", "81", "443", "853"}
+            leaked |= ports & {"53", "80", "81", "443", "853", "8445"}
     if leaked:
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
-    return ("ok", "防火墙", "53/80/81/443/853 仅限内网卡来源")
+    return ("ok", "防火墙", "53/80/81/443/853/8445 仅限内网卡来源")
 
 def check_cert():
     p = _cert_path()
