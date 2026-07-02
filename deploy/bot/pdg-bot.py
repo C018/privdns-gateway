@@ -1574,6 +1574,8 @@ def kb_pick_named(prefix, items, back=BACK):
 
 # ── 回调 (原地编辑) ──
 def handle_cb(chat, mid, data):
+    if data in ("menu", "status") or data.startswith("nav:"):
+        state.pop(chat, None); del_sel.pop(chat, None)   # 返回/切页 = 放弃进行中的输入流程和勾选, 免得下一条文字被旧状态误吃
     if data in ("menu", "status"):
         edit(chat, mid, status_text(), MENU); return
     if data.startswith("nav:"):
