@@ -96,6 +96,7 @@ sudo PDG_NONINTERACTIVE=1 \
 | 80 | tcp | 仅内网卡段 | sing-box HTTP 入口(嗅 Host) |
 | 53 | tcp+udp | 仅内网卡段 | 明文 DNS |
 | 81 | tcp | 仅内网卡段 | iOS OnDemand 探测端点 |
+| 5228-5230 | tcp | 仅内网卡段 | GMS/FCM 推送(mtalk.google.com 原生端口,经 sing-box 嗅探分流) |
 | 9090 | tcp | 仅 127.0.0.1 | sing-box clash_api(bot 用,不对外) |
 | 8443 | tcp | 临时·仅内网卡 | `pdg ios` 下发描述文件时短开,用完自动关 |
 

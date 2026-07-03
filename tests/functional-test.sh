@@ -54,6 +54,8 @@ cat > "$WORK/sb.json" <<'JSON'
   "log": { "level": "error" },
   "inbounds": [
     { "type": "direct", "tag": "in", "listen": "127.0.0.1", "listen_port": 18443,
+      "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms" },
+    { "type": "direct", "tag": "in-gms", "network": "tcp", "listen": "127.0.0.1", "listen_port": 15228,
       "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms" }
   ],
   "outbounds": [
@@ -64,7 +66,8 @@ cat > "$WORK/sb.json" <<'JSON'
   "route": {
     "rules": [
       { "domain_suffix": ["alpha.test"], "outbound": "exitA" },
-      { "domain_suffix": ["beta.test"],  "outbound": "exitB" }
+      { "domain_suffix": ["beta.test"],  "outbound": "exitB" },
+      { "domain_suffix": ["mtalk.google.com"], "outbound": "exitB" }
     ],
     "final": "exitDefault"
   }
@@ -83,9 +86,9 @@ done
 [[ "$ready" == 1 ]] || { cat "$WORK/sb.out" >&2; fail "sing-box 入口 :18443 未就绪"; }
 
 # ── 4. 三个 SNI, 断言落到正确出口(只比对 host, 端口随入口口子) ──
-check_case(){  # $1=SNI $2=期望日志文件 $3=出口名
-  local sni="$1" log="$2" name="$3"
-  python3 "$HERE/sni_client.py" 127.0.0.1 18443 "$sni"
+check_case(){  # $1=SNI $2=期望日志文件 $3=出口名 [$4=入口端口, 默认 18443]
+  local sni="$1" log="$2" name="$3" port="${4:-18443}"
+  python3 "$HERE/sni_client.py" 127.0.0.1 "$port" "$sni"
   for _ in $(seq 1 30); do grep -q "^${sni}:" "$log" 2>/dev/null && { note "  $sni → $name ✓"; return 0; }; sleep 0.1; done
   echo "---- sing-box 输出 ----" >&2; cat "$WORK/sb.out" >&2
   fail "SNI=$sni 未按预期到达 $name (A='$(tr '\n' ' ' <"$LOGA")' B='$(tr '\n' ' ' <"$LOGB")' D='$(tr '\n' ' ' <"$LOGD")')"
@@ -96,9 +99,13 @@ check_case alpha.test "$LOGA" "exitA(域名规则)"
 check_case beta.test  "$LOGB" "exitB(域名规则)"
 check_case gamma.test "$LOGD" "exitDefault(final 兜底)"
 
+note "用例: GMS 推送端口入站(模拟 :5228, mtalk 经嗅探按域名分流)"
+check_case mtalk.google.com "$LOGB" "exitB(GMS 入站+域名规则)" 15228
+
 # 反向断言: 命中规则的 SNI 不应串到别的出口
 grep -q alpha.test "$LOGB" "$LOGD" 2>/dev/null && fail "alpha.test 串到了错误出口"
 grep -q beta.test  "$LOGA" "$LOGD" 2>/dev/null && fail "beta.test 串到了错误出口"
+grep -q mtalk.google.com "$LOGA" "$LOGD" 2>/dev/null && fail "mtalk.google.com 串到了错误出口"
 
 echo
-echo "✅ 功能测试通过: TLS SNI 嗅探 + 按域名多出口分流 + final 兜底 均正确。"
+echo "✅ 功能测试通过: TLS SNI 嗅探 + 按域名多出口分流 + final 兜底 + GMS 端口入站 均正确。"

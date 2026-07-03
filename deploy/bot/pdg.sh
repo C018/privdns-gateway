@@ -241,6 +241,80 @@ PY
   fi
 }
 
+# 老装迁移: sing-box 补 5228-5230 direct 嗅探入站(GMS/FCM 推送端口 mtalk.google.com)。幂等。
+# 不补则被 DNS 劫持的 mtalk 只能靠客户端回落 443, 回落慢的手机表现为"Google 服务连不上"。
+# check 不过/起不来自动还原。$1 可指定文件(供测试), 默认 /etc/sing-box/config.json。
+# shellcheck disable=SC2120  # $1 仅测试注入, 生产调用不传参
+migrate_singbox_gms(){
+  local f="${1:-/etc/sing-box/config.json}"
+  [[ -f "$f" ]] || return 0
+  grep -q '"listen_port": 5228' "$f" && return 0              # 已有 → 幂等退出
+  grep -q '"sniff_override_destination"' "$f" || return 0     # 不是本项目形态的配置 → 不动
+  command -v sing-box >/dev/null || return 0
+  c_g "检测到 sing-box 缺 GMS 推送入站 → 补 5228-5230 嗅探入站…"
+  local bak; bak="$f.pregms.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "  备份失败(磁盘满?), 中止、不动现网。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  if ! python3 - "$f" <<'PY'
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p))
+ins = c.get("inbounds", [])
+idx = next((n + 1 for n, i in enumerate(ins) if i.get("listen_port") == 80),
+           next((n + 1 for n, i in enumerate(ins) if i.get("listen_port") == 443), len(ins)))
+for off, port in enumerate((5228, 5229, 5230)):
+    ins.insert(idx + off, {"type": "direct", "tag": "in-gms-%d" % port, "network": "tcp",
+                           "listen": "0.0.0.0", "listen_port": port,
+                           "sniff": True, "sniff_override_destination": True, "sniff_timeout": "300ms"})
+c["inbounds"] = ins
+json.dump(c, open(p, "w"), ensure_ascii=False, indent=2)
+PY
+  then c_y "  生成失败 → 还原。"; cp -a "$bak" "$f"; return 0; fi
+  if ! sing-box check -c "$f" >/dev/null 2>&1; then
+    c_y "  sing-box check 未过 → 还原、不重启。"; cp -a "$bak" "$f"; return 0
+  fi
+  systemctl reset-failed sing-box 2>/dev/null; systemctl restart sing-box 2>/dev/null; sleep 2
+  if [[ "$(systemctl is-active sing-box 2>/dev/null)" == active ]]; then
+    c_g "  ✅ 已补 GMS 入站(5228-5230)。"
+  else
+    c_y "  ⚠️ sing-box 重启失败 → 还原。"; cp -a "$bak" "$f"
+    systemctl reset-failed sing-box 2>/dev/null; systemctl restart sing-box 2>/dev/null
+  fi
+}
+
+# 老装迁移: 防火墙内网放行集补 5228-5230(配合上面的 sing-box 入站)。幂等。
+# 只动"原装形态"的那一行(严格匹配现行端口集); 自定义端口集不碰, 提示手动加。
+# $1 可指定文件(供测试), 默认 /etc/nftables.conf; 测试时 nft 可用函数打桩。
+# shellcheck disable=SC2120  # $1 仅测试注入, 生产调用不传参
+migrate_fw_gms(){
+  local f="${1:-/etc/nftables.conf}"
+  [[ -f "$f" ]] || return 0
+  grep -q 'table inet pdg' "$f" || return 0                   # 未迁到 inet pdg 的先走 migrate_firewall_to_pdg, 下次再补
+  grep -qE 'tcp dport [{][^}]*5228' "$f" && return 0          # 已有 → 幂等退出
+  if ! grep -qE 'ip saddr [0-9./]+ tcp dport [{] 53, 80, 81, 443, 853, 8445 [}] accept' "$f"; then
+    c_y "防火墙端口集非原装形态, 不自动加 GMS 推送端口。可手动把 5228-5230 加进内网 tcp 放行集。"
+    return 0
+  fi
+  c_g "检测到防火墙缺 GMS 推送端口 → 内网放行集补 5228-5230…"
+  local bak; bak="$f.pregms.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "  备份失败(磁盘满?), 中止、不动现网。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  sed -E -i 's#(ip saddr [0-9./]+ tcp dport [{] 53, 80, 81, 443, 853), 8445 [}] accept#\1, 5228-5230, 8445 } accept#' "$f"
+  if ! grep -qE 'tcp dport [{][^}]*5228-5230' "$f"; then
+    c_y "  改写未生效 → 还原。"; cp -a "$bak" "$f"; return 0
+  fi
+  if ! nft -c -f "$f" >/dev/null 2>&1; then
+    c_y "  nft -c 校验未过 → 还原、内核未动。"; cp -a "$bak" "$f"; return 0
+  fi
+  if nft -f "$f" 2>/dev/null; then
+    c_g "  ✅ 已放行 5228-5230(仅内网卡来源)。"
+  else
+    c_y "  ⚠️ 加载失败 → 还原配置(内核里旧规则仍在生效)。"; cp -a "$bak" "$f"
+  fi
+}
+
 SNAP_DIR="/var/lib/privdns-gateway/backups"
 
 cmd_snapshot(){
@@ -327,6 +401,8 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
   migrate_firewall_to_pdg   # 老装: 防火墙 inet filter → 独立表 inet pdg(否则证书续期开不了 80)
+  migrate_singbox_gms       # 老装: sing-box 补 GMS 推送入站(5228-5230 嗅探分流)
+  migrate_fw_gms            # 老装: 防火墙内网放行集补 5228-5230(配合上面入站)
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
@@ -500,7 +576,8 @@ menu(){
 if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
-    *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true ;;   # 管理类命令才迁移
+    *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
+       migrate_singbox_gms || true; migrate_fw_gms || true ;;   # 管理类命令才迁移
   esac
 fi
 

@@ -123,13 +123,20 @@ def check_nft():
         s = ln.strip()
         if "saddr" in s or "accept" not in s:
             continue  # 限定来源的行 / 非 accept 行, 跳过
-        m = re.search(r"dport\s*\{?\s*([0-9,\s]+)", s)
+        m = re.search(r"dport\s*\{?\s*([0-9,\-\s]+)", s)   # 端口集可含区间(如 5228-5230)
         if m:
-            ports = {p.strip() for p in m.group(1).split(",") if p.strip().isdigit()}
-            leaked |= ports & {"53", "80", "81", "443", "853", "8445"}
+            ports = set()
+            for tok in m.group(1).split(","):
+                tok = tok.strip()
+                if tok.isdigit():
+                    ports.add(tok)
+                elif re.match(r"^\d+-\d+$", tok):          # 区间展开(有限步, 防畸形大区间)
+                    a, b = (int(x) for x in tok.split("-"))
+                    ports.update(str(x) for x in range(a, min(b, a + 16) + 1))
+            leaked |= ports & {"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445"}
     if leaked:
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
-    return ("ok", "防火墙", "53/80/81/443/853/8445 仅限内网卡来源")
+    return ("ok", "防火墙", "53/80/81/443/853/5228-5230/8445 仅限内网卡来源")
 
 def check_cert():
     p = _cert_path()
