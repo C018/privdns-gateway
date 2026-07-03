@@ -29,4 +29,42 @@ checks._run = lambda cmd: (0, "chain input {\n tcp dport { 22 } accept\n"
 st, _, msg = checks.check_nft()
 assert st == "ok", (st, msg)
 
+# 宽区间对全网开放: 不枚举也要把落在区间内的敏感端口全报出来
+checks._run = lambda cmd: (0, "chain input {\n tcp dport { 1-65535 } accept\n}", "")
+st, _, msg = checks.check_nft()
+assert st == "fail", (st, msg)
+for p in ("53", "443", "5228", "5230", "8445"):
+    assert p in msg, (p, msg)
+
+# 宽区间但限定内网来源: 不算泄露
+checks._run = lambda cmd: (0, "chain input {\n ip saddr 172.22.0.0/16 tcp dport { 1-65535 } accept\n}", "")
+st, _, msg = checks.check_nft()
+assert st == "ok", (st, msg)
+
+# ── check_gms: sing-box 三入站 + 防火墙内网放行 → ok; 任一缺失 → warn(不 fail) ──
+import json, tempfile
+
+NFT_OK = ("chain input {\n ip saddr 172.22.0.0/16 tcp dport { 53, 80-81, 443, 853, 5228-5230, 8445 } accept\n}")
+NFT_NO_GMS = ("chain input {\n ip saddr 172.22.0.0/16 tcp dport { 53, 80-81, 443, 853, 8445 } accept\n}")
+
+def gms_case(ports, nft_out):
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"inbounds": [{"type": "direct", "listen_port": p} for p in ports]}, f)
+        path = f.name
+    checks.SB = path
+    checks._run = lambda cmd: (0, nft_out, "")
+    return checks.check_gms()
+
+st, _, msg = gms_case([443, 80, 5228, 5229, 5230], NFT_OK)
+assert st == "ok" and "5228-5230" in msg, (st, msg)
+
+st, _, msg = gms_case([443, 80, 5229, 5230], NFT_OK)          # sing-box 缺 5228
+assert st == "warn" and "pdg" in msg, (st, msg)
+
+st, _, msg = gms_case([443, 80, 5228, 5229, 5230], NFT_NO_GMS)  # 防火墙缺 5228-5230
+assert st == "warn", (st, msg)
+
+st, _, msg = gms_case([443, 80], NFT_NO_GMS)                    # 双缺也只 warn, 不 fail
+assert st == "warn", (st, msg)
+
 print("doctor-firewall regression OK")

@@ -125,18 +125,40 @@ def check_nft():
             continue  # 限定来源的行 / 非 accept 行, 跳过
         m = re.search(r"dport\s*\{?\s*([0-9,\-\s]+)", s)   # 端口集可含区间(如 5228-5230)
         if m:
-            ports = set()
+            sens = {"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445"}
             for tok in m.group(1).split(","):
                 tok = tok.strip()
-                if tok.isdigit():
-                    ports.add(tok)
-                elif re.match(r"^\d+-\d+$", tok):          # 区间展开(有限步, 防畸形大区间)
+                if tok.isdigit() and tok in sens:
+                    leaked.add(tok)
+                elif re.match(r"^\d+-\d+$", tok):          # 区间: 判敏感端口是否落在区间内, 不枚举(1-65535 也能报全)
                     a, b = (int(x) for x in tok.split("-"))
-                    ports.update(str(x) for x in range(a, min(b, a + 16) + 1))
-            leaked |= ports & {"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445"}
+                    leaked |= {p for p in sens if a <= int(p) <= b}
     if leaked:
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
     return ("ok", "防火墙", "53/80/81/443/853/5228-5230/8445 仅限内网卡来源")
+
+def check_gms():
+    """GMS/FCM 推送端口(5228-5230)是否完整启用。只读、不触发迁移: 老装第一次 pdg update
+    跑在旧脚本里, 迁移要等下一次 root 管理类命令; 没落地前用 warn 提示(不 fail, 自定义防火墙用户合法缺席)。"""
+    try:
+        have = {i.get("listen_port") for i in json.load(open(SB)).get("inbounds", [])}
+    except Exception:  # noqa: BLE001
+        have = set()
+    sb_ok = {5228, 5229, 5230} <= have
+    _, out, _ = _run(["nft", "list", "chain", "inet", "pdg", "input"])
+    if not out:
+        _, out, _ = _run(["nft", "list", "chain", "inet", "filter", "input"])
+    if not out:                                  # 没 nft 权限/没装时退回看 on-disk 配置
+        try:
+            out = open("/etc/nftables.conf").read()
+        except OSError:
+            out = ""
+    fw_ok = any("saddr" in ln and "5228" in ln and "tcp" in ln and "accept" in ln
+                for ln in out.splitlines())      # 覆盖原装形态(内网来源 + 5228-5230 区间)即可
+    if sb_ok and fw_ok:
+        return ("ok", "GMS 推送", "GMS/FCM 5228-5230 已启用")
+    return ("warn", "GMS 推送", "GMS/FCM 推送端口未完整启用; 运行 sudo pdg restart 或 sudo pdg 触发迁移。"
+                                "若使用自定义防火墙, 请手动放行内网卡段 → 5228-5230/tcp。")
 
 def check_cert():
     p = _cert_path()
@@ -301,7 +323,7 @@ def check_deep_upstreams():
     return (level, "DNS 上游探测", " ; ".join(parts))
 
 ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_cert, check_dns, check_singbox_config]
+       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_singbox_config]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加
