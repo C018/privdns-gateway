@@ -40,6 +40,12 @@ plugins:
   - tag: has_resp
     type: sequence
     args: [ { matches: has_resp, exec: accept } ]
+  # 单客户端 QPS 兜底(误配置/异常设备): 仅内网来源进 internal_sequence 时生效, 放在缓存查询之前,
+  # 超限直接 REFUSED, 不再消耗缓存/上游。nftables 来源限制仍是第一道边界; 这不是 DDoS 防护。
+  # rate_limiter 是 matcher: matches 为真=在限额内; 故用 "!$client_limiter" 命中超限。
+  - tag: client_limiter
+    type: rate_limiter
+    args: { qps: 200, burst: 400, mask4: 32, mask6: 128 }
   # 响应缓存 (lazy): 只在 internal_sequence 内缓存, 按 qname+qtype 缓存安全。
   - tag: lazy_cache
     type: cache
@@ -49,6 +55,8 @@ plugins:
   - tag: internal_sequence
     type: sequence
     args:
+      - matches: "!$client_limiter"     # 单客户端超 QPS → REFUSED, 抢在缓存/上游之前拦掉
+        exec: reject 5
       - exec: $lazy_cache
       - exec: jump has_resp
       - matches: qname $geosite_cn

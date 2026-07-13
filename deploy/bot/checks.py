@@ -160,6 +160,36 @@ def check_gms():
     return ("warn", "GMS 推送", "GMS/FCM 推送端口未完整启用; 运行 sudo pdg restart 或 sudo pdg 触发迁移。"
                                 "若使用自定义防火墙, 请手动放行内网卡段 → 5228-5230/tcp。")
 
+def _internal_seq_block(conf):
+    """截取 mosdns config 里 internal_sequence 一段文本 (到下一个顶层 '  - tag:' 为止)。"""
+    lines = conf.splitlines()
+    out, grab = [], False
+    for ln in lines:
+        if ln.startswith("  - tag: internal_sequence"):
+            grab = True; out.append(ln); continue
+        if grab and ln.startswith("  - tag: "):
+            break
+        if grab:
+            out.append(ln)
+    return "\n".join(out)
+
+def check_mosdns_ratelimit():
+    """单客户端 QPS 兜底(rate_limiter)是否就位: 插件存在 且 internal_sequence 缓存查询之前拦超限。
+    只读; 缺失/位置异常 → warn(不 fail, 老装未迁移或高度自定义配置属合法缺席)。"""
+    conf = _mos()
+    if not conf:
+        return ("warn", "限流", "读不到 mosdns 配置")
+    has_plugin = "type: rate_limiter" in conf and "client_limiter" in conf
+    blk = _internal_seq_block(conf)
+    i_lim = blk.find("!$client_limiter")
+    i_cache = blk.find("$lazy_cache")
+    placed = i_lim >= 0 and (i_cache < 0 or i_lim < i_cache)   # 限流在缓存查询之前
+    if has_plugin and placed:
+        return ("ok", "限流", "单客户端 QPS 兜底已就位(rate_limiter, 缓存前)")
+    return ("warn", "限流", "mosdns 未启用单客户端 QPS 兜底(rate_limiter); "
+                            "运行 sudo pdg restart 或 sudo pdg 触发迁移。高度自定义配置请手动在 "
+                            "internal_sequence 缓存前加 '!$client_limiter → reject 5'。")
+
 def check_cert():
     p = _cert_path()
     if not os.path.exists(p):
@@ -323,7 +353,8 @@ def check_deep_upstreams():
     return (level, "DNS 上游探测", " ; ".join(parts))
 
 ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_singbox_config]
+       check_internal_cidr, check_nft, check_gms, check_mosdns_ratelimit, check_cert,
+       check_dns, check_singbox_config]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加

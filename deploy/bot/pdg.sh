@@ -241,6 +241,47 @@ PY
   fi
 }
 
+# 老装迁移: 给 mosdns 补"单客户端 QPS 兜底"(rate_limiter)。幂等。
+# 只对本项目形态的 config(有 internal_sequence + npn_clients)做定点插入: 加 client_limiter 插件,
+# 并在 internal_sequence 缓存查询之前插一条 "!$client_limiter → reject 5"。高度自定义的配置不动(doctor 会 warn)。
+# 只改这两处, 不碰用户的上游/其它内容; check(重启+active)失败自动还原。$1 可指定文件(供测试)。
+# shellcheck disable=SC2120  # $1 仅测试注入, 生产调用不传参
+migrate_mosdns_ratelimit(){
+  local f="${1:-/etc/mosdns/config.yaml}"
+  [[ -f "$f" ]] || return 0
+  grep -q 'client_limiter' "$f" && return 0                       # 已有 → 幂等退出
+  grep -q 'tag: internal_sequence' "$f" && grep -q 'tag: npn_clients' "$f" || return 0   # 非本项目形态 → 不动
+  grep -qE '^\s+- exec: \$lazy_cache' "$f" || return 0            # 缺缓存锚点 → 不动(交 doctor warn)
+  c_g "给 mosdns 补单客户端 QPS 兜底(rate_limiter, 平时无感)…"
+  local bak; bak="$f.preratelimit.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "  备份失败(磁盘满?), 中止、不动现网。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  if ! python3 - "$f" <<'PY'
+import sys
+f=sys.argv[1]; s=open(f).read()
+plug='''  - tag: client_limiter
+    type: rate_limiter
+    args: { qps: 200, burst: 400, mask4: 32, mask6: 128 }
+  - tag: internal_sequence'''
+assert s.count('  - tag: internal_sequence')==1, 'internal_sequence 锚点不唯一'
+s=s.replace('  - tag: internal_sequence', plug, 1)
+step='''      - matches: "!$client_limiter"
+        exec: reject 5
+      - exec: $lazy_cache'''
+assert s.count('      - exec: $lazy_cache')==1, 'lazy_cache 锚点不唯一'
+s=s.replace('      - exec: $lazy_cache', step, 1)
+open(f,'w').write(s)
+PY
+  then c_y "  生成失败 → 还原。"; cp -a "$bak" "$f"; return 0; fi
+  systemctl restart mosdns 2>/dev/null; sleep 1
+  if [[ "$(systemctl is-active mosdns 2>/dev/null)" == active ]]; then
+    c_g "  ✅ 已补 client_limiter。"
+  else
+    c_y "  ⚠️ mosdns 重启失败 → 还原。"; cp -a "$bak" "$f" 2>/dev/null; systemctl restart mosdns 2>/dev/null
+  fi
+}
+
 # 老装迁移: sing-box 补 5228-5230 direct 嗅探入站(GMS/FCM 推送端口 mtalk.google.com)。幂等。
 # 不补则被 DNS 劫持的 mtalk 只能靠客户端回落 443, 回落慢的手机表现为"Google 服务连不上"。
 # check 不过/起不来自动还原。$1 可指定文件(供测试), 默认 /etc/sing-box/config.json。
@@ -403,6 +444,7 @@ cmd_update(){
   migrate_firewall_to_pdg   # 老装: 防火墙 inet filter → 独立表 inet pdg(否则证书续期开不了 80)
   migrate_singbox_gms       # 老装: sing-box 补 GMS 推送入站(5228-5230 嗅探分流)
   migrate_fw_gms            # 老装: 防火墙内网放行集补 5228-5230(配合上面入站)
+  migrate_mosdns_ratelimit  # 老装: mosdns 补单客户端 QPS 兜底(rate_limiter)
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
@@ -577,7 +619,7 @@ if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
     *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
-       migrate_singbox_gms || true; migrate_fw_gms || true ;;   # 管理类命令才迁移
+       migrate_singbox_gms || true; migrate_fw_gms || true; migrate_mosdns_ratelimit || true ;;   # 管理类命令才迁移
   esac
 fi
 

@@ -115,5 +115,7 @@ jobs:
         run: bash tests/functional-test.sh
       - name: DNS 层 (真起 mosdns 验证 A 劫持 / AAAA·HTTPS 置空 / 国内直连 / 按来源门控)
         run: bash tests/dns-policy-test.sh
+      - name: DNS 限流 (rate_limiter 迁移幂等 + 真起 mosdns 验证超限 REFUSED + doctor)
+        run: bash tests/test-mosdns-ratelimit.sh
       - name: 出站 schema (锁定版 sing-box check 各协议 parse_link 输出)
         run: bash tests/test-outbound-schema.sh
