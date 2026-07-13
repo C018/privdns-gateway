@@ -60,7 +60,7 @@ pdg_lowmem_current(){
 # 只改这两处已知项, 保留用户上游/其它内容; mosdns 改动走"备份+重启 active 门+失败还原"。
 # shellcheck disable=SC2120  # $1/$2 仅测试注入
 migrate_lowmem(){
-  local mos="${1:-/etc/mosdns/config.yaml}" jrnl="${2:-/etc/systemd/system/journald.conf.d/50-pdg.conf}"
+  local mos="${1:-/etc/mosdns/config.yaml}" jrnl="${2:-/etc/systemd/journald.conf.d/50-pdg.conf}"
   local mode cache jmax; mode="$(pdg_lowmem_resolve)"; cache="$(pdg_cache_size "$mode")"; jmax="$(pdg_journald_max "$mode")"
   if [[ -f "$mos" ]] && grep -q 'tag: lazy_cache' "$mos"; then
     local cur; cur="$(awk '/tag: lazy_cache/{f=1} f&&/size:/{print $2; exit}' "$mos")"

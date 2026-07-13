@@ -2,6 +2,10 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-13 — v1.2.1(修 journald drop-in 路径)
+
+- **修**:journald 用量封顶(`50-pdg.conf`)一直被装到 `/etc/systemd/system/journald.conf.d/`——但 journald 实际只读 `/etc/systemd/journald.conf.d/`,导致封顶(标准 50M / 低内存 20M)从未生效。install.sh / uninstall.sh / pdg.sh(低内存迁移默认路径)统一改到正确目录;老装 `pdg update` 后触发迁移即把已有的正确路径文件调到目标值。此前 pre-existing,借低内存模式一并修正。
+
 ## 2026-07-13 — v1.2.0(mosdns 限流 + 低内存模式 + bot 凭据保护/并发)
 
 - **增 · mosdns 单客户端 QPS 兜底**:模板加 `client_limiter`(qps200/burst400/mask4-32/mask6-128),internal_sequence 缓存前 `!$client_limiter → reject 5`,仅内网来源生效,超限 REFUSED。定位为误配置/异常设备兜底,非 DDoS 防护;nftables 来源限制仍是第一道边界。老装幂等迁移;doctor 精确校验参数+动作(缓存前 reject 5)。

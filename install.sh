@@ -104,7 +104,7 @@ rollback(){
       pdg-rules-update.timer pdg-health.timer 2>/dev/null
   rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
         /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
-        /etc/systemd/system/journald.conf.d/50-pdg.conf
+        /etc/systemd/journald.conf.d/50-pdg.conf
   systemctl daemon-reload 2>/dev/null
   nft delete table inet pdg 2>/dev/null
   rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /etc/privdns-gateway
@@ -203,7 +203,7 @@ fi
 
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
-install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
+install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/journald.conf.d
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
 install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
@@ -260,7 +260,7 @@ install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.timer   /etc/systemd/syste
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service       /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer         /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-probe81.service      /etc/systemd/system/
-render "$REPO_DIR/deploy/firewall/journald-50-pdg.conf" > /etc/systemd/system/journald.conf.d/50-pdg.conf; chmod 644 /etc/systemd/system/journald.conf.d/50-pdg.conf
+render "$REPO_DIR/deploy/firewall/journald-50-pdg.conf" > /etc/systemd/journald.conf.d/50-pdg.conf; chmod 644 /etc/systemd/journald.conf.d/50-pdg.conf
 
 cat > /etc/systemd/system/mosdns.service <<'EOF'
 [Unit]
