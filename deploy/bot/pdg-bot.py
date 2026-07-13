@@ -313,18 +313,30 @@ def apply_sb(modify):
         if not got:
             return False, BUSY_MSG
         shutil.copy(SB, SB + ".botbak"); os.chmod(SB + ".botbak", 0o600)
-        c = load(); modify(c); _write(c)
-        chk = sh(["sing-box", "check", "-c", SB])
-        if chk.returncode != 0:
-            shutil.copy(SB + ".botbak", SB)   # 运行中的 sing-box 没动过(check 只在文件上做), 还原文件即可, 不必重启
-            return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
-        sh(["systemctl", "reset-failed", "sing-box"])   # 清掉 start-limit 计数: 连改多条(如连删域名)快速多次重启不会触发限速锁死
-        r = sh(["systemctl", "restart", "sing-box"])
-        if r.returncode != 0 or not _svc_active("sing-box"):   # 没起来/起来又崩, 还原文件再重启一次, 别把代理留在挂掉状态
-            shutil.copy(SB + ".botbak", SB)
-            sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
-            return False, "重启 sing-box 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
-        return True, ""
+        wrote = False
+        try:
+            c = load(); modify(c); _write(c); wrote = True   # 写了新配置后, 任何异常都必须还原
+            chk = sh(["sing-box", "check", "-c", SB])
+            if chk.returncode != 0:
+                shutil.copy(SB + ".botbak", SB)   # 运行中的 sing-box 没动过(check 只在文件上做), 还原文件即可, 不必重启
+                return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
+            sh(["systemctl", "reset-failed", "sing-box"])   # 清掉 start-limit 计数: 连改多条(如连删域名)快速多次重启不会触发限速锁死
+            r = sh(["systemctl", "restart", "sing-box"])
+            if r.returncode != 0 or not _svc_active("sing-box"):   # 没起来/起来又崩, 还原文件再重启一次, 别把代理留在挂掉状态
+                shutil.copy(SB + ".botbak", SB)
+                sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
+                return False, "重启 sing-box 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
+            return True, ""
+        except Exception as e:  # noqa: BLE001
+            # check/restart 超时(TimeoutExpired)、modify/写盘等异常: 绝不留未验证的新配置。
+            # 已写过新配置就还原备份并尽力重启回已知good; 返回失败(TG Bot 会据此提示), 不外泄异常正文。
+            if wrote:
+                try:
+                    shutil.copy(SB + ".botbak", SB)
+                    sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
+                except Exception:  # noqa: BLE001
+                    pass
+            return False, "应用配置异常(%s),已还原上一份配置。" % type(e).__name__
 
 # 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。sing-box 支持的都列上。
 PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",

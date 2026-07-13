@@ -129,6 +129,11 @@ assert st_of(base.replace('mask4: 32','mask4: 24'))=="warn", "mask4 错应 warn"
 assert st_of(base.replace('        exec: reject 5','        exec: accept'))=="warn", "动作 accept 应 warn"
 # 动作错(reject 5→reject 3)→ warn
 assert st_of(base.replace('        exec: reject 5','        exec: reject 3'))=="warn", "reject 3 应 warn"
+# 缓存前动作错(accept)+ 缓存后另有正确 reject 5 → 仍 warn(不被后面的正确步骤蒙混)
+dup=base.replace('        exec: reject 5','        exec: accept',1)   # 只改缓存前那条
+dup=dup.replace('      - exec: $remote_upstream',
+                '      - matches: "!$client_limiter"\n        exec: reject 5\n      - exec: $remote_upstream',1)
+assert st_of(dup)=="warn", "缓存前 accept + 缓存后 reject5 → 应 warn"
 PY
 
 echo "────────────────────────────────────────"

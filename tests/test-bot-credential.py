@@ -171,6 +171,32 @@ assert 5 not in bot._busy, "任务异常后 BUSY 必须释放"
 bot.run_bg(5, lambda: None).result(5)
 print("[OK]   任务异常后 BUSY 释放")
 
+# ── apply_sb 事务性: check/restart 超时也还原备份, 不留未验证配置 ────────────
+import json as _json
+sbf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+_json.dump({"outbounds": [{"tag": "orig"}]}, sbf); sbf.close()
+bot.SB = sbf.name
+lf = tempfile.NamedTemporaryFile(delete=False); lf.close(); bot.LOCKFILE = lf.name
+bot.apply_sb = _REAL_APPLY_SB
+def boom_sh(cmd, *a, **k):
+    if "check" in cmd:
+        raise subprocess.TimeoutExpired(cmd, 180)   # 模拟 sing-box check 超时
+    class R:
+        returncode = 0; stdout = ""; stderr = ""
+    return R()
+bot.sh = boom_sh
+ok, msg = bot.apply_sb(lambda c: c["outbounds"].append({"tag": "new"}))
+assert ok is False and "还原" in msg, ("异常应还原并返回失败", ok, msg)
+assert SECRET not in msg
+restored = _json.load(open(bot.SB))
+assert [o["tag"] for o in restored["outbounds"]] == ["orig"], ("配置必须回到未改前", restored)
+for p in (sbf.name, sbf.name + ".botbak", lf.name):
+    try:
+        os.unlink(p)
+    except OSError:
+        pass
+print("[OK]   apply_sb 异常(超时)事务性还原, 不留未验证配置")
+
 # ── _cfg_guard: 别的进程持 flock → False; 且 _cfg_lock 非阻塞 ────────────────
 bot.apply_sb = _REAL_APPLY_SB
 tmp = tempfile.NamedTemporaryFile(delete=False); tmp.close()

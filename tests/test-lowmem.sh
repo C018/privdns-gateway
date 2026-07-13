@@ -94,6 +94,21 @@ out=$(PDG_PROFILE="$WORK/prof.env" PDG_MEMINFO="$WORK/mem512" bash -c '
 echo "$out" | grep -q 'RESTARTS=0' && ok "生成器失败: 未重启 mosdns" || bad "生成器失败却重启了 mosdns"
 ls "$WORK"/mosf.yaml.*.tmp >/dev/null 2>&1 && bad "残留临时文件未清理" || ok "临时文件已清理"
 
+# 原子替换(mv)失败 → 配置不变、不重启、清临时文件
+sed -e 's/__SERVER_IP__/10.0.0.9/g' -e 's#__INTERNAL_CIDR__#127.0.0.0/8#g' -e 's#__CERT_DIR__#/tmp/c#g' \
+    -e 's/__MOSDNS_CACHE__/8192/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mosm.yaml"
+before="$(md5sum "$WORK/mosm.yaml" | awk '{print $1}')"
+out=$(PDG_PROFILE="$WORK/prof.env" PDG_MEMINFO="$WORK/mem512" bash -c '
+  c_g(){ :; }; c_y(){ :; }; RESTARTS=0
+  systemctl(){ case "$1" in is-active) echo active;; restart) RESTARTS=$((RESTARTS+1));; esac; return 0; }
+  mv(){ return 1; }                             # 原子替换失败
+  source "'"$WORK/lowmem.sh"'"
+  migrate_lowmem "'"$WORK/mosm.yaml"'" "'"$WORK/jrnlok.conf"'"
+  echo "RESTARTS=$RESTARTS"')
+[[ "$(md5sum "$WORK/mosm.yaml" | awk '{print $1}')" == "$before" ]] && ok "mv 失败: mosdns 配置原样不变" || bad "mv 失败却改了配置"
+echo "$out" | grep -q 'RESTARTS=0' && ok "mv 失败: 未重启 mosdns" || bad "mv 失败却重启了 mosdns"
+ls "$WORK"/mosm.yaml.*.tmp >/dev/null 2>&1 && bad "mv 失败残留临时文件" || ok "mv 失败: 临时文件已清理"
+
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $nfail"
 [[ "$nfail" == 0 ]]

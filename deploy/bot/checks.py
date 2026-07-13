@@ -196,14 +196,13 @@ def check_mosdns_ratelimit():
         mm = re.search(r"\b" + k + r"\s*:\s*(\d+)", args)
         if not mm or mm.group(1) != v:
             return _RL_WARN
-    # 2) internal_sequence 里 '!$client_limiter' 的紧邻 exec 必须是 reject 5, 且在缓存查询之前
+    # 2) 缓存查询之前必须有一条 '!$client_limiter → reject 5'。
+    #    关键: 匹配到的 reject 5 步骤本身要在缓存之前 —— 否则"缓存前动作错(如 accept)+ 缓存后另有正确 reject 5"
+    #    会被误判为 ok。故用 step.start() < i_cache 校验, 而非只看首个 !$client_limiter 的位置。
     blk = _internal_seq_block(conf)
-    i_lim = blk.find("!$client_limiter")
     i_cache = blk.find("$lazy_cache")
-    if i_lim < 0 or (i_cache >= 0 and i_lim >= i_cache):
-        return _RL_WARN
     step = re.search(r'matches:\s*"?!\$client_limiter"?\s*\n\s*exec:\s*reject\s+5\b', blk)
-    if not step:
+    if not step or (i_cache >= 0 and step.start() >= i_cache):
         return _RL_WARN
     return ("ok", "限流", "单客户端 QPS 兜底已就位(rate_limiter qps200/burst400, reject 5, 缓存前)")
 

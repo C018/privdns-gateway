@@ -81,7 +81,9 @@ PY
         if ! grep -qE "size:[[:space:]]*$cache\b" "$tmp"; then
           c_y "  生成结果未含目标 cache size → 不改、不重启。"; rm -f "$tmp"; return 0
         fi
-        mv "$tmp" "$mos"                                       # 原子替换(同目录 rename)
+        if ! mv "$tmp" "$mos" 2>/dev/null; then               # 原子替换失败 → 清理临时文件, 不重启
+          c_y "  原子替换 mosdns 配置失败 → 清理临时文件, 不重启。"; rm -f "$tmp"; return 0
+        fi
         systemctl restart mosdns 2>/dev/null; sleep 1
         if [[ "$(systemctl is-active mosdns 2>/dev/null)" != active ]]; then
           c_y "  mosdns cache 调整后重启失败 → 还原。"; cp -a "$bak" "$mos" 2>/dev/null; systemctl restart mosdns 2>/dev/null
