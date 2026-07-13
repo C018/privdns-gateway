@@ -2,6 +2,13 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-13 — v1.2.0(mosdns 限流 + 低内存模式 + bot 凭据保护/并发)
+
+- **增 · mosdns 单客户端 QPS 兜底**:模板加 `client_limiter`(qps200/burst400/mask4-32/mask6-128),internal_sequence 缓存前 `!$client_limiter → reject 5`,仅内网来源生效,超限 REFUSED。定位为误配置/异常设备兜底,非 DDoS 防护;nftables 来源限制仍是第一道边界。老装幂等迁移;doctor 精确校验参数+动作(缓存前 reject 5)。
+- **增 · 克制版低内存模式**:`PDG_LOWMEM=auto|1|0`,MemTotal ≤ 1300MiB 判低内存,持久化 `profile.env`(auto 沿用已有选择)。只调 mosdns cache(8192/2048)+ journald 上限(50M/20M);**不加 sysctl、不自动 swap、不设 MemoryMax/GOMEMLIMIT**。install 渲染 + 老装幂等迁移(临时文件+校验+原子替换+失败不重启);`pdg status`/doctor 显示内存模式与 cache size。
+- **增 · bot 凭据保护 + 并发**:粘贴节点链接后立即清状态 → 独立线程尽力 `deleteMessage` 删含凭据原消息(BUSY/提交失败路径也删)→ 成功只显示出口名,失败不回显链接/异常正文;后台有界执行器不阻塞主轮询;per-chat BUSY 防重复;`apply_sb` 用进程内非阻塞锁 + 跨进程 flock(复用 `/run/privdns-gateway.lock`)与 `pdg update/rollback` 协调,并做事务回滚(check/重启异常也还原备份、不留未验证配置)。
+- 全程新增回归测试并挂 CI(限流迁移+真限流、低内存 fixture、凭据/并发/事务),sing-box 模板零改动。
+
 ## 2026-07-03 — v1.1.16(doctor 宽区间泄露判定 + GMS 启用自检)
 
 - **修**:doctor 防火墙检查对端口区间原先"最多展开 16 个端口",`tcp dport { 1-65535 } accept` 这类误配置会漏报;改为**判断敏感端口是否落在区间内**(不枚举),多宽的区间都报得全。
