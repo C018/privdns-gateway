@@ -77,11 +77,41 @@ ok, err = bot._ensure_zashboard()
 assert not ok and "SHA256" in err, ("SHA 不符应拒绝", ok, err)
 print("[OK]   zashboard SHA256 不符 → 拒绝安装")
 
+# ── 定时自动关闭: arm 排定时器 + 记链接; autoclose 关面板+删链接 ──────────────
+# 让 set_panel 走前面的 mock(可开可关), _ensure/cidr/firewall/server_ip 已 mock
+bot._ensure_zashboard = lambda: (True, "")
+bot._panel_cidr = lambda: "172.22.0.0/16"
+cfg2 = {"experimental": {"clash_api": {"external_controller": "127.0.0.1:9090"}}}
+bot.apply_sb = lambda mod: (mod(cfg2), (True, ""))[1]
+deleted = []
+bot.delete_message = lambda ch, m: deleted.append((ch, m))
+sent2 = []
+bot.send_plain = lambda ch, t: sent2.append(t)
+
+bot.set_panel(True)
+bot._panel_arm(42, 999, 0.05)                    # 50ms 后自动关
+assert bot._panel_link == (42, 999) and bot._panel_timer is not None, "arm 应记链接+排定时器"
+assert bot._panel_on(cfg2) is True
+import time as _t; _t.sleep(0.2)                 # 等定时器触发
+assert bot._panel_on(cfg2) is False, "到时应自动关面板"
+assert (42, 999) in deleted, "到时应删掉含密钥的链接消息"
+assert bot._panel_link is None and bot._panel_timer is None
+print("[OK]   定时到期: 自动关面板 + 删链接消息")
+
+# 手动关也删链接 + 取消定时器
+bot.set_panel(True); bot._panel_arm(7, 555, 3600)
+bot._panel_cancel_timer(); bot._panel_delete_link()
+assert bot._panel_timer is None and bot._panel_link is None and (7, 555) in deleted
+print("[OK]   手动关: 取消定时器 + 删链接消息")
+
 # ── 菜单/回调接线 ────────────────────────────────────────────────────────────
 src = (ROOT / "deploy/bot/pdg-bot.py").read_text(encoding="utf-8")
 assert '"callback_data": "panel"' in src, "运维菜单应有观测面板入口"
-for cb in ('if data == "panel":', 'if data == "panel:on":', 'if data == "panel:off":'):
+for cb in ('if data == "panel":', 'if data.startswith("panel:on:"):', 'if data == "panel:off":'):
     assert cb in src, f"缺回调 {cb}"
-print("[OK]   运维菜单 + panel/on/off 回调接线")
+for token in ('"panel:on:10"', '"panel:on:30"', '"panel:on:0"'):
+    assert token in src, f"缺时长按钮 {token}"
+assert "_panel_arm(chat, link_mid" in src and "if _panel_on():" in src, "缺 arm 调用 / 启动兜底关面板"
+print("[OK]   运维菜单 + 时长按钮 + 回调接线 + 启动兜底")
 
 print("panel regression OK")

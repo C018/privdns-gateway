@@ -889,6 +889,51 @@ def set_panel(on):
     _panel_firewall(False, _panel_cidr())
     return True, "✅ 观测面板已关闭(clash_api 收回 127.0.0.1、撤销内网 9090 放行)。"
 
+# ── 面板定时自动关闭(到点关面板 + 删含密钥的链接消息, 忘了关也有暴露上限)──
+_panel_timer = None            # threading.Timer 或 None
+_panel_link = None             # (chat, message_id) 含密钥的链接消息, 供自动删除
+
+def _panel_cancel_timer():
+    global _panel_timer
+    if _panel_timer is not None:
+        try:
+            _panel_timer.cancel()
+        except Exception:  # noqa: BLE001
+            pass
+        _panel_timer = None
+
+def _panel_autoclose():
+    """定时到期: 关面板 → 删掉含密钥的链接消息 → 通知。"""
+    global _panel_timer
+    _panel_timer = None
+    ok, _ = set_panel(False)
+    ch = _panel_link[0] if _panel_link else None
+    _panel_delete_link()
+    if ch:
+        send_plain(ch, "⏱ 观测面板已到时自动关闭,上面那条链接已失效。" if ok
+                       else "⏱ 到时自动关闭观测面板时出错,请手动点「🔒 关闭」确认。")
+
+def _panel_arm(chat, link_mid, ttl):
+    """记录链接消息 + 按 ttl(秒)排自动关闭定时器; ttl<=0 = 常开不排。"""
+    global _panel_timer, _panel_link
+    _panel_cancel_timer()
+    _panel_link = (chat, link_mid) if link_mid else None
+    if ttl > 0:
+        _panel_timer = threading.Timer(ttl, _panel_autoclose)
+        _panel_timer.daemon = True
+        _panel_timer.start()
+
+def _panel_delete_link():
+    """删掉含密钥的链接消息(手动关/自动关都调)。"""
+    global _panel_link
+    if _panel_link:
+        delete_message(*_panel_link); _panel_link = None
+
+def send_get_mid(chat, text):
+    """发纯文本(不解析 HTML, 保链接可点)并返回 message_id, 供之后删除。"""
+    r = post("sendMessage", {"chat_id": chat, "text": text, "disable_web_page_preview": True})
+    return (r.get("result") or {}).get("message_id")
+
 # ── 规则集 (Surge .list -> sing-box local rule_set) ──
 def _rs_meta():
     if os.path.exists(RS_META):
@@ -1996,25 +2041,35 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "📊 <b>观测面板 (zashboard)</b>\n"
              f"当前: <b>{'开启' if on else '关闭'}</b>\n"
              "看连接/流量/延迟/日志、右键测速。<b>只能观测, 改配置仍走 bot</b>。\n"
-             "开启 = clash_api 临时绑 0.0.0.0 + 随机密钥 + 放行<b>仅内网卡段</b>→9090, 发一键链接;关闭撤销全部。\n"
-             "⚠️ HTTP 明文、链接含密钥(别转发);看完请关闭。",
-             {"inline_keyboard": [[{"text": "📊 开启并出链接", "callback_data": "panel:on"},
-                                   {"text": "🔒 关闭", "callback_data": "panel:off"}],
+             "开启 = clash_api 临时绑 0.0.0.0 + 随机密钥 + 放行<b>仅内网卡段</b>→9090, 发一键链接。\n"
+             "选自动关闭时长: 到点自动关面板 + 删掉含密钥的链接(忘了关也有暴露上限)。\n"
+             "⚠️ HTTP 明文、链接含密钥(别转发)。",
+             {"inline_keyboard": [[{"text": "⏱ 开10分", "callback_data": "panel:on:10"},
+                                   {"text": "⏱ 开30分", "callback_data": "panel:on:30"},
+                                   {"text": "🔓 常开", "callback_data": "panel:on:0"}],
+                                  [{"text": "🔒 关闭", "callback_data": "panel:off"}],
                                   [{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}],
                                   [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
-    if data == "panel:on":
+    if data.startswith("panel:on:"):
+        mins = int(data.rsplit(":", 1)[1]) if data.rsplit(":", 1)[1].isdigit() else 10
         edit(chat, mid, "正在开启观测面板(首次会下载 zashboard、改 clash_api、放行内网 9090)…", OPS_BACK)
         ok, res = set_panel(True)
         if ok:
             send_plain(chat, "✅ 观测面板已开启。手机在<b>内网卡</b>下点开下面链接直接进面板(已自带密钥):")
-            send_plain(chat, res)   # 单独一条纯文本, 保证链接可点、不被 HTML 转义破坏
-            edit(chat, mid, "✅ 已开启(链接见上一条)。⚠️ 链接含密钥别转发;看完点「🔒 关闭」。\n"
-                            "首次打开若打不开, 多半是手机没走内网卡到 9090, 换到内网卡/专线再试。", OPS_BACK)
+            link_mid = send_get_mid(chat, res)   # 单独纯文本, 保链接可点; 记 id 供到时删除
+            _panel_arm(chat, link_mid, mins * 60)
+            tip = (f"⏱ {mins} 分钟后自动关闭并删除上面的链接。" if mins > 0
+                   else "🔓 常开模式: 不自动关闭, 看完请手动点「🔒 关闭」。")
+            edit(chat, mid, "✅ 已开启(链接见上一条)。" + tip + "\n"
+                            "⚠️ 链接含密钥别转发。首次打不开多半是手机没走内网卡到 9090, 换内网卡/专线再试。", OPS_BACK)
         else:
             edit(chat, mid, "❌ 开启失败: " + res, OPS_BACK)
         return
     if data == "panel:off":
-        ok, msg = set_panel(False); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
+        _panel_cancel_timer()
+        ok, msg = set_panel(False)
+        _panel_delete_link()                     # 手动关也删掉含密钥的链接消息
+        edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
     if data == "restart":
         ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
         edit(chat, mid, "✅ 已重启 sing-box + mosdns" if ok else msg, OPS_BACK); return
@@ -2218,6 +2273,12 @@ def main():
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})
     print("pdg-bot v3 started, allowed:", ALLOWED, flush=True)
+    try:                                   # 兜底: 上次留下的面板(bot 重启后定时器已丢)直接关掉, 限制暴露
+        if _panel_on():
+            set_panel(False)
+            print("panel: closed leftover panel on startup", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("panel startup close err", type(e).__name__, flush=True)
     off = 0
     while True:
         r = post("getUpdates", {"offset": off, "timeout": 50})
