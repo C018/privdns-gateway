@@ -2,6 +2,13 @@
 
 本项目按语义化 `v1.x` tag 正式发布;以下按版本/日期记录主要变化,完整提交见 git 历史。
 
+## 2026-07-14 — v1.3.0(观测面板 zashboard,bot 开关控制)
+
+- **增**:bot「🛠 运维 → 📊 观测面板」——一键开启 [zashboard](https://github.com/Zephyruso/zashboard)(看连接/流量/延迟/日志、右键测速)。**只观测,改配置仍走 bot**。
+- 默认**零暴露**:clash_api 只绑 `127.0.0.1`、无 secret、防火墙不放行 9090。开启时临时绑 `0.0.0.0` + 随机 secret + `external_ui`(sing-box 自身托管面板静态文件,**不新起服务、几乎不占内存**)+ 放行**仅内网卡段**→9090,并发一条 zashboard 一键链接(`#/setup` 自带 host/port/secret);关闭撤销全部。
+- zashboard dist 钉版本(`v3.15.0` dist-no-fonts)+ SHA256 校验(供应链);bot/doctor 的 clash_api 调用自动带 `Authorization: Bearer`(面板开启后本机调用也要鉴权)。
+- ⚠️ HTTP 明文、链接含密钥(别转发)、暴露一个内网端口 —— 看完请关闭。
+
 ## 2026-07-13 — v1.2.5(快照/journald 迁移边界收口)
 
 - **修**:`run_all_migrations` 会删掉历史错路径文件,而 `cmd_snapshot` 随后无条件打包该路径 → tar 报 `Cannot stat` 返 2,却仍提示"✅ 快照"。改为只打包**存在的**路径并检查 tar 返回值。

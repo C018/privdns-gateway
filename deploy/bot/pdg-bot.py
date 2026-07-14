@@ -204,7 +204,8 @@ def _nav(key):
         "ops": ("🛠 <b>运维</b> — 选一项:", [
             [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
             [{"text": "💾 备份", "callback_data": "backup"}, {"text": "♻️ 恢复", "callback_data": "restore"}],
-            [{"text": "🌐 DNS 上游", "callback_data": "dnsup"}, {"text": "🚀 TFO", "callback_data": "tfo"}]]),
+            [{"text": "🌐 DNS 上游", "callback_data": "dnsup"}, {"text": "🚀 TFO", "callback_data": "tfo"}],
+            [{"text": "📊 观测面板", "callback_data": "panel"}]]),
     }
     title, rows = subs[key]
     return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
@@ -271,8 +272,19 @@ def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
 # ── clash_api (sing-box experimental) ──
+def _clash_secret():
+    """观测面板开启时 clash_api 设了 secret; 本机调用也要带 Bearer, 否则 401。从 sing-box 配置现读现用。"""
+    try:
+        return (load().get("experimental", {}).get("clash_api", {}) or {}).get("secret") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
 def clash_get(path):
-    with urllib.request.urlopen(CLASH + path, timeout=12) as r:
+    req = urllib.request.Request(CLASH + path)
+    sec = _clash_secret()
+    if sec:
+        req.add_header("Authorization", "Bearer " + sec)
+    with urllib.request.urlopen(req, timeout=12) as r:
         return json.load(r)
 
 def clash_up():
@@ -795,6 +807,87 @@ def set_tfo(on):
             pass
     return ok, ((f"✅ TFO 已{'开启' if on else '关闭'}(出口+入口)\n"
                  "降到落地的握手延迟; 需落地端也支持, 否则自动回落普通握手。") if ok else msg)
+
+# ── 观测面板 (zashboard, 由 sing-box external_ui 托管在 clash_api 端口) ──────────
+# 默认关闭=零暴露: clash_api 只绑 127.0.0.1、无 secret、防火墙不放行 9090。
+# 开启=临时把 clash_api 绑 0.0.0.0 + 随机 secret + external_ui, 并放行"仅内网卡段"→9090,
+# 发一条 zashboard 一键链接(#/setup 自带 host/port/secret)。关闭撤销全部改动。
+PANEL_PORT = 9090
+UI_DIR = "/etc/sing-box/ui"
+ZASH_URL = "https://github.com/Zephyruso/zashboard/releases/download/v3.15.0/dist-no-fonts.zip"
+ZASH_SHA = "403b351d3663f5fe65db053cb2f3dc980108d8f86e8c6968d56164d3452592e1"
+UI_DIST = os.path.join(UI_DIR, "dist")
+
+def _panel_on(c=None):
+    c = c or load()
+    ec = (c.get("experimental", {}).get("clash_api", {}) or {}).get("external_controller", "")
+    return ec.startswith("0.0.0.0")
+
+def _panel_cidr():
+    """从防火墙现有放行规则读内网卡段(和 853/443 同源门控)。"""
+    out = sh(["nft", "list", "chain", "inet", "pdg", "input"]).stdout
+    m = re.search(r"ip saddr ([0-9.]+/[0-9]+) tcp dport", out)
+    return m.group(1) if m else ""
+
+def _ensure_zashboard():
+    """下载并校验 zashboard dist 到 UI_DIST(已有 index.html 则跳过)。返回 (ok, err)。"""
+    if os.path.exists(os.path.join(UI_DIST, "index.html")):
+        return True, ""
+    try:
+        data = _fetch_bytes(ZASH_URL)
+        if hashlib.sha256(data).hexdigest() != ZASH_SHA:
+            return False, "zashboard 校验失败(SHA256 不符, 拒绝安装)"
+        os.makedirs(UI_DIR, exist_ok=True)
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            z.extractall(UI_DIR)
+        return (True, "") if os.path.exists(os.path.join(UI_DIST, "index.html")) else (False, "解压后缺 index.html")
+    except Exception as e:  # noqa: BLE001
+        return False, "下载/解压失败: " + type(e).__name__
+
+def _panel_firewall(on, cidr):
+    """放行/撤销 内网卡段 → 9090(带 comment 便于幂等删除)。ephemeral: nft 重载会掉, 用时开即可。"""
+    out = sh(["nft", "-a", "list", "chain", "inet", "pdg", "input"]).stdout
+    for ln in out.splitlines():
+        if "pdg-panel" in ln:
+            m = re.search(r"handle (\d+)", ln)
+            if m:
+                sh(["nft", "delete", "rule", "inet", "pdg", "input", "handle", m.group(1)])
+    if on and cidr:
+        sh(["nft", "insert", "rule", "inet", "pdg", "input", "ip", "saddr", cidr,
+            "tcp", "dport", str(PANEL_PORT), "accept", "comment", "pdg-panel"])
+
+def set_panel(on):
+    if on:
+        cidr = _panel_cidr()
+        if not cidr:
+            return False, "读不到内网卡段(防火墙未就绪?), 暂不开启"
+        ok, err = _ensure_zashboard()
+        if not ok:
+            return False, err
+        secret = uuid.uuid4().hex
+        def mod(c):
+            api = c.setdefault("experimental", {}).setdefault("clash_api", {})
+            api["external_controller"] = "0.0.0.0:%d" % PANEL_PORT
+            api["secret"] = secret
+            api["external_ui"] = UI_DIST
+        ok, msg = apply_sb(mod)
+        if not ok:
+            return False, msg
+        _panel_firewall(True, cidr)
+        ip = _server_ip()
+        link = "http://%s:%d/ui/#/setup?hostname=%s&port=%d&secret=%s" % (ip, PANEL_PORT, ip, PANEL_PORT, secret)
+        secret = None
+        return True, link
+    def mod(c):
+        api = c.setdefault("experimental", {}).setdefault("clash_api", {})
+        api["external_controller"] = "127.0.0.1:%d" % PANEL_PORT
+        api.pop("secret", None); api.pop("external_ui", None)
+    ok, msg = apply_sb(mod)
+    if not ok:
+        return False, msg
+    _panel_firewall(False, _panel_cidr())
+    return True, "✅ 观测面板已关闭(clash_api 收回 127.0.0.1、撤销内网 9090 放行)。"
 
 # ── 规则集 (Surge .list -> sing-box local rule_set) ──
 def _rs_meta():
@@ -1898,6 +1991,30 @@ def handle_cb(chat, mid, data):
                                   [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data in ("tfo:on", "tfo:off"):
         ok, msg = set_tfo(data == "tfo:on"); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
+    if data == "panel":
+        on = _panel_on()
+        edit(chat, mid, "📊 <b>观测面板 (zashboard)</b>\n"
+             f"当前: <b>{'开启' if on else '关闭'}</b>\n"
+             "看连接/流量/延迟/日志、右键测速。<b>只能观测, 改配置仍走 bot</b>。\n"
+             "开启 = clash_api 临时绑 0.0.0.0 + 随机密钥 + 放行<b>仅内网卡段</b>→9090, 发一键链接;关闭撤销全部。\n"
+             "⚠️ HTTP 明文、链接含密钥(别转发);看完请关闭。",
+             {"inline_keyboard": [[{"text": "📊 开启并出链接", "callback_data": "panel:on"},
+                                   {"text": "🔒 关闭", "callback_data": "panel:off"}],
+                                  [{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}],
+                                  [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
+    if data == "panel:on":
+        edit(chat, mid, "正在开启观测面板(首次会下载 zashboard、改 clash_api、放行内网 9090)…", OPS_BACK)
+        ok, res = set_panel(True)
+        if ok:
+            send_plain(chat, "✅ 观测面板已开启。手机在<b>内网卡</b>下点开下面链接直接进面板(已自带密钥):")
+            send_plain(chat, res)   # 单独一条纯文本, 保证链接可点、不被 HTML 转义破坏
+            edit(chat, mid, "✅ 已开启(链接见上一条)。⚠️ 链接含密钥别转发;看完点「🔒 关闭」。\n"
+                            "首次打开若打不开, 多半是手机没走内网卡到 9090, 换到内网卡/专线再试。", OPS_BACK)
+        else:
+            edit(chat, mid, "❌ 开启失败: " + res, OPS_BACK)
+        return
+    if data == "panel:off":
+        ok, msg = set_panel(False); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
     if data == "restart":
         ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
         edit(chat, mid, "✅ 已重启 sing-box + mosdns" if ok else msg, OPS_BACK); return

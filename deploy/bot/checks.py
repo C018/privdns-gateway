@@ -285,7 +285,15 @@ def check_deep_dns_cn():
 
 def check_deep_clash():
     try:
-        with urllib.request.urlopen("http://127.0.0.1:9090/proxies", timeout=5) as r:
+        req = urllib.request.Request("http://127.0.0.1:9090/proxies")
+        sec = ""                                    # 观测面板开启时 clash_api 设了 secret, 本机也要带 Bearer
+        try:
+            sec = (json.load(open(SB)).get("experimental", {}).get("clash_api", {}) or {}).get("secret") or ""
+        except Exception:  # noqa: BLE001
+            pass
+        if sec:
+            req.add_header("Authorization", "Bearer " + sec)
+        with urllib.request.urlopen(req, timeout=5) as r:
             n = len(json.load(r).get("proxies", {}))
         return ("ok", "clash_api", f"127.0.0.1:9090 可读, {n} 个出站/组")
     except Exception as e:  # noqa: BLE001
