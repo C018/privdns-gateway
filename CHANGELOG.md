@@ -2,6 +2,12 @@
 
 本项目按语义化 `v1.x` tag 正式发布;以下按版本/日期记录主要变化,完整提交见 git 历史。
 
+## 2026-07-13 — v1.2.5(快照/journald 迁移边界收口)
+
+- **修**:`run_all_migrations` 会删掉历史错路径文件,而 `cmd_snapshot` 随后无条件打包该路径 → tar 报 `Cannot stat` 返 2,却仍提示"✅ 快照"。改为只打包**存在的**路径并检查 tar 返回值。
+- **修**:journald drop-in **补建/重建分支**的重启用 `restart || true`,重启失败仍报绿。改为检查重启结果,失败给 warn。
+- **修**:v1.2.3 拼接畸形留下的 `[Journal]SystemMaxUse=…`(段头与 key 同行)会被前缀正则误判为已有段头,修不掉;只有 key、完全无段头的文件也不修。现要求**独立**段头(整行 `[Journal]`),缺失/畸形则按标准内容**重建**(项目独占文件,安全)。
+
 ## 2026-07-13 — v1.2.4(迁移即时生效 + journald 迁移稳健性)
 
 - **修**:`pdg update` / TG Bot 更新仍在旧 Bash 进程里跑,新版迁移要等下次 root 命令才生效。`cmd_update` 装好新脚本后改为 `bash /usr/local/bin/pdg __migrate` 用**新脚本**跑迁移(迁移集中到 `run_all_migrations`)。

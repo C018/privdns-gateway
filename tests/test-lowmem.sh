@@ -176,6 +176,29 @@ else
   ok "写入失败测试(需非 root, 已跳过)"
 fi
 
+# P3: v1.2.3 拼接畸形 [Journal]SystemMaxUse=20M → 重建为独立段头 + 两 key(不留畸形行)
+capjrnl(){ bash -c "
+  c_g(){ :; }; c_y(){ :; }; systemctl(){ [[ \"\$1\" == is-active ]] && echo active; return 0; }
+  source '$WORK/lowmem.sh'; _migrate_journald_cap \"\$1\" '$WORK/none.conf' 20M" _ "$1"; }
+printf '[Journal]SystemMaxUse=20M\n' > "$WORK/jbad.conf"
+capjrnl "$WORK/jbad.conf"
+grep -qxE '\[Journal\]' "$WORK/jbad.conf" && grep -qxE 'SystemMaxUse=20M' "$WORK/jbad.conf" \
+  && grep -qxE 'RuntimeMaxUse=20M' "$WORK/jbad.conf" && ! grep -q 'Journal\]SystemMaxUse' "$WORK/jbad.conf" \
+  && ok "畸形 [Journal]Key 文件 → 重建为合法段头 + 两 key(不留畸形行)" || bad "畸形文件未被重建修复"
+# P3: 只有 key、完全没有段头 → 重建补段头
+printf 'SystemMaxUse=20M\n' > "$WORK/jnohdr.conf"
+capjrnl "$WORK/jnohdr.conf"
+grep -qxE '\[Journal\]' "$WORK/jnohdr.conf" && grep -qxE 'RuntimeMaxUse=20M' "$WORK/jnohdr.conf" \
+  && ok "只有 key 无段头 → 重建补独立段头" || bad "无段头文件未修复"
+
+# P2-b: 补建/重建分支 journald 重启失败 → warn 不假绿
+rm -f "$WORK/jnew.conf"
+out=$(bash -c "
+  c_g(){ echo GREEN; }; c_y(){ echo YELLOW; }
+  systemctl(){ [[ \"\$1\" == restart ]] && return 1; return 0; }   # 重启失败
+  source '$WORK/lowmem.sh'; _migrate_journald_cap '$WORK/jnew.conf' '$WORK/none.conf' 20M")
+{ echo "$out" | grep -q YELLOW && ! echo "$out" | grep -q GREEN; } && ok "重建分支重启失败 → warn 不假绿" || bad "重建重启失败却报绿(out=$out)"
+
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $nfail"
 [[ "$nfail" == 0 ]]

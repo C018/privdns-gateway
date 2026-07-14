@@ -47,7 +47,8 @@ _journald_set_key(){
     if [[ -s "$file" && "$(tail -c1 "$file" 2>/dev/null | wc -l)" -eq 0 ]]; then
       printf '\n' >> "$file" 2>/dev/null || return 2                 # 末尾无换行 → 先补, 避免 [Journal]Key 拼接
     fi
-    grep -qE '^\[Journal\]' "$file" 2>/dev/null || printf '[Journal]\n' >> "$file" 2>/dev/null || return 2
+    # 需"独立"段头(整行=[Journal]); 拼接畸形行 [Journal]Key= 不算, 缺则补一个独立段头
+    grep -qxE '\[Journal\][[:space:]]*' "$file" 2>/dev/null || printf '[Journal]\n' >> "$file" 2>/dev/null || return 2
     printf '%s=%s\n' "$key" "$val" >> "$file" 2>/dev/null || return 2
   fi
   return 0
@@ -105,16 +106,22 @@ PY
 }
 
 # journald 封顶: 清错目录残留 + 正确目录 System/Runtime 都封到 jmax。写失败/复核不符/重启失败均 warn(不假绿)。
+# 我们的 drop-in 是项目独占的; 文件缺失或"没有独立有效 [Journal] 段头"(含 v1.2.3 拼接畸形 [Journal]Key=、
+# 只有 key、零字节)一律按标准内容重建, 避免非法段头修不掉。
 _migrate_journald_cap(){
   local jrnl="$1" jrnl_legacy="$2" jmax="$3"
   [[ "$jrnl_legacy" != "$jrnl" && -f "$jrnl_legacy" ]] && rm -f "$jrnl_legacy"
-  if [[ ! -f "$jrnl" ]]; then                    # 正确目录缺文件 → 补建
-    mkdir -p "$(dirname "$jrnl")" 2>/dev/null \
-      && printf '[Journal]\nSystemMaxUse=%s\nRuntimeMaxUse=%s\n' "$jmax" "$jmax" > "$jrnl" 2>/dev/null \
-      && { systemctl restart systemd-journald 2>/dev/null || true; c_g "  journald 封顶补到正确目录 → $jmax"; } \
-      || c_y "  journald 封顶补建失败(目录只读?)→ 未生效, 请检查 $jrnl。"
+  if [[ ! -f "$jrnl" ]] || ! grep -qxE '\[Journal\][[:space:]]*' "$jrnl" 2>/dev/null; then
+    if mkdir -p "$(dirname "$jrnl")" 2>/dev/null \
+       && printf '[Journal]\nSystemMaxUse=%s\nRuntimeMaxUse=%s\n' "$jmax" "$jmax" > "$jrnl" 2>/dev/null; then
+      if systemctl restart systemd-journald 2>/dev/null; then c_g "  journald 封顶(重建)→ $jmax(System+Runtime)"
+      else c_y "  journald 封顶已写入但 journald 重启失败 → 重启系统后生效。"; fi
+    else
+      c_y "  journald 封顶写入失败(目录只读?)→ 未生效, 请检查 $jrnl。"
+    fi
     return 0
   fi
+  # 有独立合法段头 → 逐 key 设置(保留文件其它内容)
   local r1 r2; _journald_set_key "$jrnl" SystemMaxUse "$jmax"; r1=$?; _journald_set_key "$jrnl" RuntimeMaxUse "$jmax"; r2=$?
   if [[ "$r1" == 2 || "$r2" == 2 ]]; then
     c_y "  journald 封顶写入失败(目录只读?)→ 未完全生效, 请检查 $jrnl。"; return 0
@@ -485,10 +492,14 @@ cmd_snapshot(){
   local ts d; ts=$(date +%Y%m%d-%H%M%S); d="$SNAP_DIR/$ts"
   install -d -m700 "$d"
   # 整机配置 + 防火墙 + bot.env(含 token)+ service + journald 封顶(含历史错路径)(相对 / 打包, 回滚 -C / 解开)
-  tar czf "$d/snap.tar.gz" -C / \
-    etc/mosdns etc/sing-box opt/pdg-bot etc/privdns-gateway \
-    etc/nftables.conf etc/systemd/system/pdg-bot.service \
-    etc/systemd/journald.conf.d/50-pdg.conf etc/systemd/system/journald.conf.d/50-pdg.conf 2>/dev/null
+  # 只打包"存在的"路径 —— 历史错路径可能已被迁移清掉, 无条件列进去会让 tar 报 Cannot stat 并返 2。
+  local cand=(etc/mosdns etc/sing-box opt/pdg-bot etc/privdns-gateway etc/nftables.conf
+              etc/systemd/system/pdg-bot.service etc/systemd/journald.conf.d/50-pdg.conf
+              etc/systemd/system/journald.conf.d/50-pdg.conf)
+  local items=(); local p; for p in "${cand[@]}"; do [[ -e "/$p" ]] && items+=("$p"); done
+  if ! tar czf "$d/snap.tar.gz" -C / "${items[@]}" 2>/dev/null; then
+    c_y "❌ 快照打包失败"; rm -f "$d/snap.tar.gz"; rmdir "$d" 2>/dev/null; return 1
+  fi
   chmod 600 "$d/snap.tar.gz"
   echo "✅ 快照: $d/snap.tar.gz"
   ls -1dt "$SNAP_DIR"/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf   # 只留最近 10 份
