@@ -169,6 +169,32 @@ def main():
         assert not fake.has(["systemctl", "restart", "mihomo"]), "校验失败不该重启核心"
         ok("apply_sb mihomo 校验失败: model 还原 + 渲染同步回 good + 未重启")
 
+    # ── _mihomo_rulesets: 分类 + 跳过 .srs; 渲染出 rule-providers/RULE-SET ──
+    with tempfile.TemporaryDirectory() as tmp:
+        setup(tmp)
+        bot.RS_META = os.path.join(tmp, "rulesets.json")
+        json.dump({
+            "rs_a": {"url": "https://x/netflix.list", "outbound": "ss1"},
+            "rs_b": {"url": "https://x/geo.yaml", "outbound": "ss1"},
+            "rs_c": {"url": "https://x/set.mrs", "outbound": "ss1"},
+            "rs_d": {"url": "https://x/legacy.srs", "outbound": "ss1"},
+        }, open(bot.RS_META, "w"))
+        rs = bot._mihomo_rulesets()
+        assert rs["rs_a"] == {"url": "https://x/netflix.list", "behavior": "classical", "format": "text"}
+        assert rs["rs_b"]["format"] == "yaml"
+        assert rs["rs_c"]["format"] == "mrs" and rs["rs_c"]["behavior"] == "domain"
+        assert "rs_d" not in rs, ".srs(sing-box 二进制)应跳过"
+        ok("_mihomo_rulesets 分类 text/yaml/mrs + 跳过 .srs")
+        # model 带 rule_set 规则 → 渲染出 rule-providers + RULE-SET
+        model = json.load(open(bot.SB))
+        model["route"]["rules"].insert(1, {"rule_set": "rs_a", "outbound": "ss1"})
+        json.dump(model, open(bot.SB, "w"))
+        bot._render_mihomo_file()
+        cfg = json.load(open(bot.MIHOMO_CFG))
+        assert "rs_a" in cfg.get("rule-providers", {}), "应渲染出 rule-providers"
+        assert "RULE-SET,rs_a,ss1" in cfg["rules"]
+        ok("_render_mihomo_file 从 RS_META 产出 rule-providers + RULE-SET")
+
     # ── 向后兼容: sing-box 分支不受重构影响 ──
     with tempfile.TemporaryDirectory() as tmp:
         fake = setup(tmp, backend="singbox", svc_active=True)

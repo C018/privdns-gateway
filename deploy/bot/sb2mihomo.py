@@ -272,11 +272,12 @@ def singbox_to_mihomo(sb, *, redir_port=7893, controller="127.0.0.1:9090",
     if external_ui_url:
         cfg["external-ui-url"] = external_ui_url
     if rulesets:
+        _ext = {"text": "txt", "yaml": "yaml", "mrs": "mrs"}
         cfg["rule-providers"] = {
             name: {"type": "http", "url": rs["url"],
                    "behavior": rs.get("behavior", "domain"),
                    "format": rs.get("format", "text"),
-                   "path": f"./ruleset/{name}.txt",
+                   "path": f"./ruleset/{name}.{_ext.get(rs.get('format', 'text'), 'txt')}",
                    "interval": 86400}
             for name, rs in rulesets.items()
         }

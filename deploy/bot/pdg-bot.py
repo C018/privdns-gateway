@@ -361,10 +361,33 @@ def _write_mihomo(cfg):
     os.chmod(t, 0o600)                                     # 含出口密码/uuid + 面板 secret, 收紧 600
     os.replace(t, MIHOMO_CFG)
 
+def _mihomo_rulesets():
+    """从 RS_META 构造 mihomo rule-providers 入参: rule-provider 指向原始 url, mihomo 原生抓取解析。
+    仅收文本/yaml/mrs 类; sing-box 二进制 .srs 无法被 mihomo 消费, 跳过(渲染器 meta.dropped 会报告)。"""
+    out = {}
+    try:
+        meta = _rs_meta()
+    except Exception:  # noqa: BLE001
+        return out
+    for name, info in meta.items():
+        low = str(info.get("url", "")).lower().split("?", 1)[0]
+        if low.endswith(".srs"):
+            continue
+        if low.endswith((".yaml", ".yml")):
+            behavior, fmt = "classical", "yaml"
+        elif low.endswith(".mrs"):                     # mihomo 原生二进制规则集(sing-box 不支持, 换核后可用)
+            behavior, fmt = "domain", "mrs"
+        else:                                          # Surge/Clash .list/.txt: DOMAIN/-SUFFIX/-KEYWORD/IP-CIDR 混合
+            behavior, fmt = "classical", "text"
+        out[name] = {"url": info.get("url", ""), "behavior": behavior, "format": fmt}
+    return out
+
 def _render_mihomo_file():
     """从当前 model(SB)渲染出 mihomo 配置并落盘。返回渲染 meta(dropped/unknown)。"""
     import sb2mihomo
-    cfg, meta = sb2mihomo.singbox_to_mihomo(load(), redir_port=MIHOMO_REDIR, **_panel_render_args(load()))
+    model = load()
+    cfg, meta = sb2mihomo.singbox_to_mihomo(
+        model, redir_port=MIHOMO_REDIR, rulesets=_mihomo_rulesets(), **_panel_render_args(model))
     _write_mihomo(cfg)
     return meta
 
