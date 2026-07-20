@@ -31,6 +31,11 @@ plugins:
   - tag: npn_clients
     type: ip_set
     args: { ips: ["__INTERNAL_CIDR__"] }
+  # 劫持集: 决定哪些海外域名 A 记录劫持到网关(进代理)。all 模式=geolocation-!cn(全非CN);
+  # gfw 模式=gfw(只劫持真被墙域名, 其余海外域名返真实 IP+AAAA → SSH/直连不被劫持)。install/切换按模式渲染。
+  - tag: hijack_set
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/__HIJACK_SET_FILE__"] }
   - tag: ecs_china
     type: ecs_handler
     args: {forward: false, send: true, preset: "139.226.48.0", mask4: 24, mask6: 48}
@@ -64,6 +69,15 @@ plugins:
       - matches: qname $geosite_cn
         exec: $local_upstream
       - exec: jump has_resp
+      # 不在劫持集的海外域名 → 真实海外解析(含 AAAA), 不劫持。
+      # all 模式下 hijack_set=geolocation-!cn, 非CN都在集内, 此门基本不放行(维持原"非CN全劫持");
+      # gfw 模式下只有 gfw 域名在集内, 非墙海外域名从这里返真实 IP(修 SSH/直连被劫持)。
+      - matches: "!qname $hijack_set"
+        exec: $ecs_neutral
+      - matches: "!qname $hijack_set"
+        exec: $remote_upstream
+      - exec: jump has_resp
+      # 劫持集内域名: 抑制 AAAA/HTTPS + A 记录劫持到网关(进 TCP/QUIC 代理)
       - matches: qtype 28
         exec: reject 0
       - matches: qtype 65

@@ -2,7 +2,7 @@
 """把 v2ray geosite.dat 解析成 mosdns domain_set 文本规则 (纯标准库, 手写 protobuf 解码)。
 
 用法: parse-geosite.py <geosite.dat> <输出目录>
-产出: geosite_cn.txt / geosite_geolocation-!cn.txt / geosite_apple.txt
+产出: geosite_cn.txt / geosite_geolocation-!cn.txt / geosite_apple.txt / geosite_gfw.txt
 """
 import os
 import sys
@@ -38,7 +38,8 @@ def main():
     dat, outdir = sys.argv[1], sys.argv[2]
     want = {"CN": "geosite_cn.txt",
             "GEOLOCATION-!CN": "geosite_geolocation-!cn.txt",
-            "APPLE": "geosite_apple.txt"}
+            "APPLE": "geosite_apple.txt",
+            "GFW": "geosite_gfw.txt"}          # GFWList: 只劫持真被墙的域名(gfw 劫持模式用)
     res = {k: [] for k in want}
     data = open(dat, "rb").read()
     for fn, wt, val in _fields(data):           # GeoSiteList.entry = 1
