@@ -868,6 +868,125 @@ run_all_migrations(){
   migrate_mosdns_ratelimit || true; migrate_lowmem || true; migrate_mihomo_safepaths || true
 }
 
+# 内核切换: sing-box <-> mihomo。出口/分流/证书/DoT/mosdns 全不动(model 共用), 只换内核二进制 +
+# 服务 + nft 入站模型(sing-box 裸 accept ↔ mihomo REDIRECT→7893)。失败自动回滚。
+_switchcore_nft(){   # $1=target 渲染并应用对应内核的 nft(用当前 SSH端口/内网段)
+  local target="$1" tmpl sshp icidr
+  sshp=$(grep -oP '^\s*tcp dport \{ \K[0-9]+(?= \} accept)' /etc/nftables.conf | head -1)
+  icidr=$(python3 -c "import sys;sys.path.insert(0,'/opt/pdg-bot');import checks;print(checks._internal_cidr())" 2>/dev/null)
+  [[ -n "$sshp" && -n "$icidr" ]] || { echo "提取 SSH端口/内网段失败(ssh=$sshp cidr=$icidr)"; return 1; }
+  [[ "$target" == mihomo ]] && tmpl=nftables-mihomo.conf || tmpl=nftables.conf
+  [[ -f "$REPO_DIR/deploy/firewall/$tmpl" ]] || { echo "缺 $tmpl(先 pdg update)"; return 1; }
+  sed -e "s|__SSH_PORT__|$sshp|g" -e "s|__INTERNAL_CIDR__|$icidr|g" "$REPO_DIR/deploy/firewall/$tmpl" > /etc/nftables.conf
+  nft -f /etc/nftables.conf
+}
+
+cmd_switch_core(){
+  need_root switch-core; _lock
+  local target="${1:-}" cur march plat
+  [[ "$target" == mihomo || "$target" == singbox ]] || { echo "用法: pdg switch-core <mihomo|singbox>"; return 1; }
+  cur="$(_pdg_core)"
+  [[ "$cur" == "$target" ]] && { echo "已经是 $target 内核。"; return 0; }
+  [[ -f /etc/mihomo/config.yaml || -f "$REPO_DIR/deploy/bot/sb2mihomo.py" ]] || { echo "❌ 缺 mihomo 支持文件, 先 sudo pdg update。"; return 1; }
+  c_g "切换内核 $cur → $target(出口/分流/证书/DoT 均不动)…"
+  cmd_snapshot >/dev/null 2>&1 || true
+  march=$(dpkg --print-architecture 2>/dev/null); [[ "$march" == arm64 ]] || march=amd64
+  plat="$(_pdg_platform)"
+  # shellcheck source=/dev/null
+  source "$REPO_DIR/lib/versions.sh" 2>/dev/null || { echo "❌ 读不到 versions.sh"; return 1; }
+  cp /etc/nftables.conf /etc/nftables.conf.scbak 2>/dev/null
+
+  if [[ "$target" == mihomo ]]; then
+    if ! mihomo -v 2>/dev/null | grep -q "$MIHOMO_VER"; then
+      c_g "下载 mihomo $MIHOMO_VER…"; local t; t=$(mktemp -d)
+      if ! curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/mihomo-linux-${march}-${MIHOMO_VER}.gz" -o "$t/m.gz" \
+         || ! pdg_verify_sha256 "$t/m.gz" "${PDG_SHA256[mihomo-$march]:-}" "mihomo $MIHOMO_VER" \
+         || ! gunzip -c "$t/m.gz" > "$t/mihomo"; then rm -rf "$t"; echo "❌ mihomo 下载/校验失败, 未切换"; return 1; fi
+      install -m755 "$t/mihomo" /usr/local/bin/mihomo; rm -rf "$t"
+    fi
+    install -d -m700 /etc/mihomo
+    printf 'mihomo\n' > /etc/privdns-gateway/backend      # 先切标记, 让渲染/迁移按 mihomo 走
+    if ! ( cd /opt/pdg-bot && python3 -c "import bot; bot._render_mihomo_file()" ) 2>/dev/null \
+       || ! mihomo -t -d /etc/mihomo -f /etc/mihomo/config.yaml >/dev/null 2>&1; then
+      printf 'singbox\n' > /etc/privdns-gateway/backend; echo "❌ 渲染/校验 mihomo 配置失败, 已回滚标记, 未切换"; return 1
+    fi
+    cat > /etc/systemd/system/mihomo.service <<'EOF'
+[Unit]
+Description=mihomo (PrivDNS Gateway core)
+After=network-online.target mosdns.service
+Wants=network-online.target
+[Service]
+ExecStart=/usr/local/bin/mihomo -d /etc/mihomo -f /etc/mihomo/config.yaml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+    [[ "$plat" == ios ]] && cat > /etc/systemd/system/pdg-mitm.service <<'EOF'
+[Unit]
+Description=pdg-mitm
+After=network-online.target
+[Service]
+ExecStart=/usr/bin/python3 /opt/pdg-bot/mitm_server.py 7894
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    _switchcore_nft mihomo || { printf 'singbox\n' > /etc/privdns-gateway/backend; [[ -f /etc/nftables.conf.scbak ]] && { cp /etc/nftables.conf.scbak /etc/nftables.conf; nft -f /etc/nftables.conf; }; echo "❌ nft 应用失败, 已回滚"; return 1; }
+    systemctl stop sing-box 2>/dev/null
+    systemctl reset-failed mihomo 2>/dev/null; systemctl enable --now mihomo >/dev/null 2>&1
+    [[ "$plat" == ios ]] && { systemctl enable --now pdg-mitm >/dev/null 2>&1 || true; }
+  else
+    if ! sing-box version 2>/dev/null | grep -q "version $SINGBOX_VER"; then
+      c_g "下载 sing-box $SINGBOX_VER…"; local t; t=$(mktemp -d)
+      if ! curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${march}.tar.gz" -o "$t/sb.tgz" \
+         || ! pdg_verify_sha256 "$t/sb.tgz" "${PDG_SHA256[singbox-$march]:-}" "sing-box $SINGBOX_VER" \
+         || ! tar -xzf "$t/sb.tgz" -C "$t"; then rm -rf "$t"; echo "❌ sing-box 下载/校验失败, 未切换"; return 1; fi
+      install -m755 "$t"/sing-box-*/sing-box /usr/local/bin/sing-box; rm -rf "$t"
+    fi
+    printf 'singbox\n' > /etc/privdns-gateway/backend
+    if ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
+      printf 'mihomo\n' > /etc/privdns-gateway/backend; echo "❌ sing-box 配置校验失败, 已回滚, 未切换"; return 1
+    fi
+    cat > /etc/systemd/system/sing-box.service <<'EOF'
+[Unit]
+Description=sing-box
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    _switchcore_nft singbox || { printf 'mihomo\n' > /etc/privdns-gateway/backend; [[ -f /etc/nftables.conf.scbak ]] && { cp /etc/nftables.conf.scbak /etc/nftables.conf; nft -f /etc/nftables.conf; }; echo "❌ nft 应用失败, 已回滚"; return 1; }
+    systemctl stop mihomo pdg-mitm 2>/dev/null
+    systemctl reset-failed sing-box 2>/dev/null; systemctl enable --now sing-box >/dev/null 2>&1
+  fi
+
+  sleep 2
+  local svc; svc="$(_pdg_core_svc)"
+  if [[ "$(systemctl is-active "$svc" 2>/dev/null)" == active ]]; then
+    rm -f /etc/nftables.conf.scbak
+    echo "✅ 已切换到 $target 内核(出口/分流/证书/DoT 未动)。"
+    return 0
+  fi
+  # 回滚
+  c_y "$svc 启动失败 → 回滚到 $cur …"
+  printf '%s\n' "$cur" > /etc/privdns-gateway/backend
+  [[ -f /etc/nftables.conf.scbak ]] && { cp /etc/nftables.conf.scbak /etc/nftables.conf; nft -f /etc/nftables.conf 2>/dev/null; rm -f /etc/nftables.conf.scbak; }
+  systemctl stop "$svc" 2>/dev/null
+  systemctl reset-failed "$(_pdg_core_svc)" 2>/dev/null; systemctl start "$(_pdg_core_svc)" 2>/dev/null
+  echo "❌ 切换失败, 已回滚到 $cur 内核。"
+  return 1
+}
+
 # 切换劫持模式: all(非CN全劫持) | gfw(只劫持 GFWList 真被墙域名, 非墙海外直连)。换 hijack_set 加载的域名文件。
 cmd_hijack_mode(){
   need_root hijack-mode
@@ -935,6 +1054,7 @@ case "${1:-menu}" in
   report)        shift || true; cmd_report "$@";;
   detect-cidr|cidr) shift || true; cmd_detect_cidr "${1:-}";;
   hijack-mode)   shift || true; cmd_hijack_mode "${1:-}";;
+  switch-core)   shift || true; cmd_switch_core "${1:-}";;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|hijack-mode <all|gfw>|migrate-fw|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|hijack-mode <all|gfw>|switch-core <mihomo|singbox>|migrate-fw|uninstall [--purge]]";;
 esac

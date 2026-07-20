@@ -229,6 +229,8 @@ def _nav(key):
     }
     if _platform() == "ios":                          # iOS 专属: 位置改写(WLOC)
         subs["ops"][1].append([{"text": "🍏 位置改写(WLOC)", "callback_data": "wloc"}])
+    _lbl = "🔀 换到 mihomo 内核(可更新)" if _core_backend() == "singbox" else "🔀 换回 sing-box 内核"
+    subs["ops"][1].append([{"text": _lbl, "callback_data": "switchcore"}])
     title, rows = subs[key]
     return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
 
@@ -2624,6 +2626,20 @@ def handle_cb(chat, mid, data):
         send(chat, "发「<b>纬度,经度</b>」如 <code>35.6812,139.7671</code>(小数;北纬东经为正)。/cancel 取消。", BACK); return
     if data in ("wloc:on", "wloc:off"):
         ok, msg = set_wloc(data == "wloc:on"); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
+    if data == "switchcore":
+        cur = _core_backend(); tgt = "mihomo" if cur == "singbox" else "singbox"
+        extra = ("mihomo 活跃维护、内核可持续更新(摆脱 sing-box 1.12 版本天花板)。\n" if tgt == "mihomo"
+                 else "切回 sing-box(1.12 钉死)。\n")
+        edit(chat, mid, f"🔀 <b>切换内核 {cur} → {tgt}</b>\n出口/分流/证书/DoT/规则全<b>不动</b>,只换内核 + 防火墙入站模型。\n"
+             + extra + "⚠️ 切换时代理短暂中断几秒(手机重连即恢复)。失败会自动回滚。",
+             {"inline_keyboard": [[{"text": f"✅ 确认换到 {tgt}", "callback_data": "switchcore:" + tgt}],
+                                  [{"text": "取消", "callback_data": "nav:ops"}]]}); return
+    if data in ("switchcore:mihomo", "switchcore:singbox"):
+        tgt = data.split(":", 1)[1]
+        edit(chat, mid, f"⏳ 正在切换到 <b>{tgt}</b> 内核(下载/校验/切服务, 约 10-30 秒, 期间代理短暂中断)…", OPS_BACK)
+        r = sh(["pdg", "switch-core", tgt])
+        lines = (r.stdout + r.stderr).strip().splitlines()
+        send(chat, (lines[-1] if lines else ("✅ 完成" if r.returncode == 0 else "❌ 失败")), OPS_BACK); return
     if data == "panel":
         on = _panel_on()
         edit(chat, mid, "📊 <b>临时观测/控制面板 (zashboard)</b>\n"
