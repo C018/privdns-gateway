@@ -84,10 +84,7 @@ def convert_proxy(ob):
     base = {"name": name, "server": server, "port": port}
 
     if typ == "shadowsocks":
-        p = {**base, "type": "ss", "cipher": ob.get("method"), "password": ob.get("password"), "udp": True}
-        if ob.get("tcp_fast_open"):
-            p["tfo"] = True
-        return p
+        return {**base, "type": "ss", "cipher": ob.get("method"), "password": ob.get("password"), "udp": True}
     if typ == "vmess":
         p = {**base, "type": "vmess", "uuid": ob.get("uuid"),
              "alterId": ob.get("alter_id", 0), "cipher": ob.get("security", "auto"), "udp": True}
@@ -221,12 +218,16 @@ def singbox_to_mihomo(sb, *, redir_port=7893, controller="127.0.0.1:9090",
     """
     direct_tags = _direct_tags(sb)
     proxies, unknown = [], []
+    # TCP Fast Open: sing-box tcp_fast_open → mihomo tfo, 仅 TCP 类协议(QUIC 的 hy2/tuic 无意义)
+    tfo_types = {"ss", "vmess", "trojan", "vless", "http", "socks5", "anytls"}
     for o in sb.get("outbounds", []):
         if o.get("type") in PROXY_TYPES:
             p = convert_proxy(o)
             if p is None:
                 unknown.append(o.get("tag"))
             else:
+                if o.get("tcp_fast_open") and p.get("type") in tfo_types:
+                    p["tfo"] = True
                 proxies.append(p)
 
     groups = []
