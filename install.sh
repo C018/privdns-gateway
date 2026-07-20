@@ -237,12 +237,23 @@ case "${PDG_LOWMEM:-auto}" in
           if [[ -n "$_mt" && "$_mt" -le 1331200 ]]; then LOWMEM=1; else LOWMEM=0; fi; fi;;
 esac
 if [[ "$LOWMEM" == 1 ]]; then MOSDNS_CACHE=2048; JOURNALD_MAXUSE=20M; else MOSDNS_CACHE=8192; JOURNALD_MAXUSE=50M; fi
+
+# 劫持模式: all(默认, 非CN域名全劫持进代理) | gfw(只劫持 GFWList 真被墙域名, 非墙海外域名返真实IP直连)。
+# gfw 模式修 "SSH/直连走域名被劫持到网关" 的问题; 但要求内网卡 SIM 能直达一般互联网(非墙海外可达)。持久化到 profile.env。
+case "${PDG_HIJACK_MODE:-}" in
+  gfw) HIJACK_MODE=gfw;; all) HIJACK_MODE=all;;
+  *) _hm=""; [[ -f /etc/privdns-gateway/profile.env ]] && _hm=$(sed -n 's/^PDG_HIJACK_MODE=//p' /etc/privdns-gateway/profile.env | tail -1)
+     [[ "$_hm" == gfw || "$_hm" == all ]] && HIJACK_MODE="$_hm" || HIJACK_MODE=all;;
+esac
+[[ "$HIJACK_MODE" == gfw ]] && HIJACK_SET_FILE="geosite_gfw.txt" || HIJACK_SET_FILE="geosite_geolocation-!cn.txt"
+
 install -d -m700 /etc/privdns-gateway
-printf 'PDG_LOWMEM=%s\n' "$LOWMEM" > /etc/privdns-gateway/profile.env
+printf 'PDG_LOWMEM=%s\nPDG_HIJACK_MODE=%s\n' "$LOWMEM" "$HIJACK_MODE" > /etc/privdns-gateway/profile.env
 
 render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNAL_CIDR|g" \
               -e "s|__CERT_DIR__|$CERT_DIR|g"   -e "s|__SSH_PORT__|$SSH_PORT|g" \
-              -e "s|__MOSDNS_CACHE__|$MOSDNS_CACHE|g" -e "s|__JOURNALD_MAXUSE__|$JOURNALD_MAXUSE|g" "$1"; }
+              -e "s|__MOSDNS_CACHE__|$MOSDNS_CACHE|g" -e "s|__JOURNALD_MAXUSE__|$JOURNALD_MAXUSE|g" \
+              -e "s|__HIJACK_SET_FILE__|$HIJACK_SET_FILE|g" "$1"; }
 
 render "$REPO_DIR/deploy/mosdns/config.yaml"          > /etc/mosdns/config.yaml
 render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json

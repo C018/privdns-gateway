@@ -2,6 +2,15 @@
 
 本项目按语义化 `v1.x` tag 正式发布;以下按版本/日期记录主要变化,完整提交见 git 历史。
 
+## 2026-07-20 — v1.4.2(可选 GFWList 劫持模式)
+
+- **增**:装机开关 `PDG_HIJACK_MODE=all(默认,行为不变) | gfw`,决定哪些海外域名的 A 记录被劫持到网关进代理。
+  - `all`:非国内域名全劫持(原行为)。
+  - `gfw`:只劫持 GFWList 里**真被墙**的域名;非墙的海外域名返真实 IP + AAAA → **SSH / 直连走域名不再被劫持到网关**(修此前"SSH 到域名被 DNS 劫持"的问题)。前提:内网卡 SIM 能直达一般互联网。
+- 实现:`parse-geosite.py` 加抽 GFW 类目 → `geosite_gfw.txt`;mosdns 加 `hijack_set` 域名集 + 「不在劫持集的海外域名→真实解析」的门,`hijack_set` 文件按模式渲染。DNS 层,sing-box / mihomo 均适用。
+- 已在真机 mosdns + 内网客户端实测 gfw 模式:非墙域名(example.com)返真实 IP、被墙域名(google)返网关、国内(qq.com)返真实 IP。
+- 注:老装置运行时切换命令 + bot UI 为后续;当前装机时选 `PDG_HIJACK_MODE=gfw` 即可。
+
 ## 2026-07-20 — v1.4.1(修 TFO「开了却显示关闭」+ 快照/回滚加固)
 
 - **修 TFO**:TCP Fast Open 开启后,只要再加一个出口(粘链接进来的不带 `tcp_fast_open` 标志),状态判断(原来靠「**所有**代理出口都带标志」推断)就被打成假 → 菜单显示「关闭」,且新出口也没真享受到 TFO。
