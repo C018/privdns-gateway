@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""MITM 服务(Feature B / iOS 专属)。
+
+本地 socks5 入口: mihomo 把"接管域名"的连接按规则路由到本服务(socks5 出站, 目标=接管域名)。
+本服务用自签 CA(mitm_ca)给该域名现签叶子证书、终止 TLS、把解密后的连接交给对应插件改写响应。
+非接管目标不该到这里(mihomo 只把接管域名指过来)→ 兜底关闭。
+
+插件 = 任意带 .domains(list) 与 .handle(tls, host, port) 的对象; register() 登记。
+出口"仍由内核决定": 非接管域名压根不进本服务。
+"""
+import socket
+import ssl
+import threading
+
+import mitm_ca
+
+_REGISTRY = {}   # domain(lower) -> plugin
+
+
+def register(plugin):
+    """登记插件(用它声明的 domains)。"""
+    for d in getattr(plugin, "domains", []):
+        _REGISTRY[d.lower()] = plugin
+
+
+def clear():
+    _REGISTRY.clear()
+
+
+def managed_domains():
+    return sorted(_REGISTRY)
+
+
+def _match(host):
+    h = (host or "").lower()
+    if h in _REGISTRY:
+        return _REGISTRY[h]
+    for d, p in _REGISTRY.items():          # 后缀匹配: 声明 example.com 接管 *.example.com
+        if h == d or h.endswith("." + d):
+            return p
+    return None
+
+
+def _recvn(s, n):
+    b = b""
+    while len(b) < n:
+        d = s.recv(n - len(b))
+        if not d:
+            raise IOError("eof")
+        b += d
+    return b
+
+
+def _socks5_target(conn):
+    """完成 socks5 无认证握手, 返回 (host, port)。"""
+    hdr = _recvn(conn, 2)                    # VER, NMETHODS
+    if hdr[0] != 5:
+        raise IOError("not socks5")
+    _recvn(conn, hdr[1])                     # methods
+    conn.sendall(b"\x05\x00")               # 选无认证
+    req = _recvn(conn, 4)                    # VER CMD RSV ATYP
+    atyp = req[3]
+    if atyp == 1:
+        host = socket.inet_ntoa(_recvn(conn, 4))
+    elif atyp == 3:
+        host = _recvn(conn, _recvn(conn, 1)[0]).decode("utf-8", "ignore")
+    elif atyp == 4:
+        host = socket.inet_ntop(socket.AF_INET6, _recvn(conn, 16))
+    else:
+        raise IOError("bad atyp")
+    port = int.from_bytes(_recvn(conn, 2), "big")
+    return host, port
+
+
+def _handle(conn):
+    try:
+        host, port = _socks5_target(conn)
+        plugin = _match(host)
+        if plugin is None:
+            conn.close()
+            return
+        conn.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")   # socks5 成功应答
+        crt, key = mitm_ca.leaf_cert(host)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(crt, key)
+        tls = ctx.wrap_socket(conn, server_side=True)
+        try:
+            plugin.handle(tls, host, port)
+        finally:
+            try:
+                tls.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def serve(listen="127.0.0.1", port=7894):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((listen, port))
+    srv.listen(128)
+    while True:
+        c, _ = srv.accept()
+        threading.Thread(target=_handle, args=(c,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    import sys
+    serve(port=int(sys.argv[1]) if len(sys.argv) > 1 else 7894)

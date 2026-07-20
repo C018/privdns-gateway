@@ -130,6 +130,9 @@ jobs:
       - name: "MITM CA 骨架回归 (自签 CA + 叶子证书验链/SAN/EKU/缓存)"
         run: python3 tests/test-mitm-ca.py
 
+      - name: "MITM 服务回归 (socks5→CA叶子终止TLS→插件; 客户端CA验链; 非接管兜底关闭)"
+        run: python3 tests/test-mitm-server.py
+
   functional:
     # 真功能测试: 下载钉死 SHA256 的 sing-box / mosdns, 真起一遍, 验证两层核心链路。
     runs-on: ubuntu-latest
