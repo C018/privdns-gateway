@@ -74,6 +74,7 @@ def _socks5_target(conn):
 
 def _handle(conn):
     try:
+        conn.settimeout(30)                  # 防卡死连接长期占线程(本机 mihomo 连入, 30s 足够)
         host, port = _socks5_target(conn)
         plugin = _match(host)
         if plugin is None:
