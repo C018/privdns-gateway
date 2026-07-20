@@ -387,6 +387,7 @@ with tempfile.TemporaryDirectory() as td:
     bot.SB = sb; bot.MOSDNS_CONF = mos; bot.RS_DIR = os.path.join(td, "rs")
     bot.RESTORE_MAP = {"etc/sing-box/config.json": sb}
     bot.sh = lambda cmd: _R()
+    bot._svc_active = lambda *a, **k: True   # restore 现走 core-aware _core_apply(会验服务 active)
     ok, err = bot.restore_from(raw.getvalue())
     assert ok, err
     restored = json.loads(Path(sb).read_text(encoding="utf-8"))

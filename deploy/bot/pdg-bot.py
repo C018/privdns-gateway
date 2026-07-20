@@ -341,6 +341,10 @@ def _core_backend():
         pass
     return "singbox"
 
+def _core_svc():
+    """活动内核的 systemd 服务名(mihomo / sing-box)。"""
+    return "mihomo" if _core_backend() == "mihomo" else "sing-box"
+
 def _panel_render_args(model):
     """把 model 的 experimental.clash_api(面板状态)透传给渲染器 —— mihomo 原生 clash API,
     面板开关/secret/external_ui 语义与 sing-box 一致, 无需另建状态。"""
@@ -1516,28 +1520,15 @@ def refresh_rulesets():
         os.replace(tmp, info["path"])
     if n == 0:
         return 0
-    if sh(["sing-box", "check", "-c", SB]).returncode != 0:   # 坏档 → 回滚, 不重启(不断网)
+    # 核心校验+重启(core-aware): sing-box=check SB + restart; mihomo=渲染 + `mihomo -t` + restart(重启即重取 providers)。
+    ok, err, _ = _core_apply()
+    if not ok:                              # 坏档 → 还原旧规则集 + 用好档回到已知good, 不断网
         for path, bak in swapped:
             shutil.copy(bak, path)
-        print("refresh rs: sing-box check 失败, 已回滚, 不重启")
+        _core_apply()
+        print("refresh rs: 核心校验/重启失败, 已回滚:", (err or "")[:120])
         return 0
-    # 先重启加载新规则集, 确认 sing-box 真的 active 再删 .bak; 起不来则还原旧规则集重启, 不断网。
-    sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
-    if not _svc_active("sing-box"):
-        for path, bak in swapped:
-            shutil.copy(bak, path)        # 还原旧规则集
-        sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
-        if _svc_active("sing-box"):       # 确认旧服务真的恢复, 再清备份
-            for _, bak in swapped:
-                try:
-                    os.remove(bak)
-                except OSError:
-                    pass
-            print("refresh rs: 新规则集致 sing-box 起不来, 已还原旧规则集并恢复")
-        else:                             # 连旧档都起不来 → 保留 .bak 备查, 不再删
-            print("refresh rs: 还原旧规则集后仍未 active, 保留 .bak 备查")
-        return 0
-    for _, bak in swapped:                 # 确认 active 后再清备份
+    for _, bak in swapped:                  # 成功后清备份
         try:
             os.remove(bak)
         except OSError:
@@ -1613,7 +1604,7 @@ def traffic_text():
                 cnt[tag] += 1; up[tag] += cn.get("upload", 0); dn[tag] += cn.get("download", 0)
             lines = [f"• <b>{t}</b>: {cnt[t]}条 ↑{_fmt_bytes(up[t])} ↓{_fmt_bytes(dn[t])}"
                      for t, _ in cnt.most_common()]
-            parts.append("📈 <b>实时(sing-box 本会话, 重启清零)</b>\n"
+            parts.append("📈 <b>实时(内核本会话, 重启清零)</b>\n"
                          f"会话累计 ↑{_fmt_bytes(d.get('uploadTotal'))} ↓{_fmt_bytes(d.get('downloadTotal'))}\n"
                          f"活跃连接 {len(conns)}" + ("\n" + "\n".join(lines) if lines else ""))
         except Exception as e:  # noqa: BLE001
@@ -2137,9 +2128,23 @@ def restore_from(data):
                 json.dump(cfg, open(checksb, "w"), ensure_ascii=False)
         except Exception:  # noqa: BLE001
             pass
-        chk = sh(["sing-box", "check", "-c", checksb])
-        if chk.returncode != 0:
-            return False, "备份的 sing-box 配置校验失败:\n" + (chk.stdout + chk.stderr)[-300:]
+        # 校验备份的 model(core-aware): sing-box=check checksb; mihomo=渲染临时 mihomo 配置 + `mihomo -t`
+        if _core_backend() == "mihomo":
+            try:
+                import sb2mihomo
+                mcfg, _ = sb2mihomo.singbox_to_mihomo(json.load(open(checksb)),
+                                                      redir_port=MIHOMO_REDIR, rulesets=_mihomo_rulesets())
+                mtmp = checksb + ".mihomo"
+                json.dump(mcfg, open(mtmp, "w"), ensure_ascii=False)
+                chk = sh([MIHOMO_BIN, "-t", "-d", MIHOMO_DIR, "-f", mtmp])
+            except Exception as e:  # noqa: BLE001
+                return False, "备份配置渲染 mihomo 失败(%s)" % type(e).__name__
+            if chk.returncode != 0:
+                return False, "备份的配置(mihomo)校验失败:\n" + (chk.stdout + chk.stderr)[-300:]
+        else:
+            chk = sh(["sing-box", "check", "-c", checksb])
+            if chk.returncode != 0:
+                return False, "备份的 sing-box 配置校验失败:\n" + (chk.stdout + chk.stderr)[-300:]
         ts = time.strftime("%Y%m%d-%H%M%S")
         shutil.copy(SB, SB + ".pre-restore-" + ts)
         restored = []
@@ -2151,12 +2156,13 @@ def restore_from(data):
         src_rs = os.path.join(tmp, RS_DIR.lstrip("/"))
         if os.path.isdir(src_rs):
             shutil.rmtree(RS_DIR, ignore_errors=True); shutil.copytree(src_rs, RS_DIR); restored.append("rs/")
-        r1 = sh(["systemctl", "restart", "sing-box"])
-        if r1.returncode != 0:
-            shutil.copy(SB + ".pre-restore-" + ts, SB); sh(["systemctl", "restart", "sing-box"])
-            return False, "恢复后 sing-box 启动失败, 已回滚 sing-box"
+        # 从恢复后的 model 校验+重启活动核(core-aware): sing-box=check+restart; mihomo=渲染+mihomo -t+restart
+        ok, err, _ = _core_apply()
+        if not ok:
+            shutil.copy(SB + ".pre-restore-" + ts, SB); _core_apply()   # 回滚 model + 重启回已知good
+            return False, "恢复后 %s 启动失败, 已回滚:\n%s" % (_core_svc(), (err or "")[-200:])
         sh(["systemctl", "restart", "mosdns"])
-        msg = "已恢复: " + ", ".join(restored) + "\n已重启 sing-box + mosdns"
+        msg = "已恢复: " + ", ".join(restored) + "\n已重启 " + _core_svc() + " + mosdns"
         if subs:
             msg += "\n(跨机导入: 已保留本机身份 " + "、".join(kept) + ", 只搬了出口+分流+规则集)"
         return True, msg
@@ -2193,8 +2199,9 @@ def _groups_desc(c):
     return "\n".join(f"🔀 故障组 <b>{o['tag']}</b>: {' › '.join(o.get('outbounds', []))}" for o in g)
 
 def status_text():
-    _st = sh(["systemctl", "is-active", "mosdns", "sing-box", "pdg-bot"]).stdout.split()
-    _states = dict(zip(["mosdns", "sing-box", "pdg-bot"], _st + ["?", "?", "?"]))
+    svc = _core_svc()
+    _st = sh(["systemctl", "is-active", "mosdns", svc, "pdg-bot"]).stdout.split()
+    _states = dict(zip(["mosdns", svc, "pdg-bot"], _st + ["?", "?", "?"]))
     def dot(s):
         return "🟢" if _states.get(s) == "active" else "🔴"
     c = load(); exits = exit_tags(c)
@@ -2204,7 +2211,7 @@ def status_text():
     split = "国内直连" + (f" / {nrules} 条分流规则" if nrules else "") + f" / 其余→{final}"
     return ("🖥 <b>PrivDNS Gateway</b>\n\n"
             f"{dot('mosdns')} mosdns（DNS 分流, 带缓存）\n"
-            f"{dot('sing-box')} sing-box（流量出口）\n"
+            f"{dot(svc)} {svc}（流量出口）\n"
             f"{dot('pdg-bot')} pdg-bot（管理）\n\n"
             f"📡 DoT: <code>{_dot_host()}:853</code>（Android 私密DNS / iOS 描述文件）\n"
             f"🌐 IP: <code>{_server_ip()}</code>\n"
@@ -2352,7 +2359,7 @@ def handle_cb(chat, mid, data):
         if not doms:
             _, kb = del_rule_kb(chat)
             edit(chat, mid, "还没勾选域名。勾选后再点「✅ 确认删除」:", kb); return
-        edit(chat, mid, f"⏳ 正在删除 {len(doms)} 个域名并重启 sing-box…", RULE_BACK)
+        edit(chat, mid, f"⏳ 正在删除 {len(doms)} 个域名并重启 {_core_svc()}…", RULE_BACK)
         ok, msg = del_rules_bulk(doms); del_sel.pop(chat, None)
         edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK); return
     if data == "testdom":
@@ -2430,7 +2437,7 @@ def handle_cb(chat, mid, data):
         try:
             fn = "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz"
             send_document(chat, fn, backup_blob(),
-                          "💾 配置备份(含 sing-box 出口密码, 请妥善保存)。\n恢复: 点「♻️ 恢复」后把此文件发回。")
+                          "💾 配置备份(含出口密码/uuid, 请妥善保存)。\n恢复: 点「♻️ 恢复」后把此文件发回。")
             edit(chat, mid, "✅ 备份已发送(见上一条)。", MENU)
         except Exception as e:  # noqa: BLE001
             edit(chat, mid, f"备份失败: {e}", MENU)
@@ -2438,7 +2445,7 @@ def handle_cb(chat, mid, data):
     if data == "restore":
         state[chat] = "restore"
         edit(chat, mid, "把之前「💾 备份」得到的 <code>.tar.gz</code> 作为文件发给我即可恢复"
-             "(先 sing-box check, 失败自动回滚)。\n/cancel 取消。", BACK); return
+             "(先校验配置, 失败自动回滚)。\n/cancel 取消。", BACK); return
     if data == "dnsup":
         state[chat] = "set_dns"
         rem = _upstreams("remote"); loc = _upstreams("local")
@@ -2504,7 +2511,7 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
     if data == "restart":
         ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
-        edit(chat, mid, "✅ 已重启 sing-box + mosdns" if ok else msg, OPS_BACK); return
+        edit(chat, mid, f"✅ 已重启 {_core_svc()} + mosdns" if ok else msg, OPS_BACK); return
     if data == "updgeo":
         edit(chat, mid, "正在更新 geosite + 规则集…", OPS_BACK)
         r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
