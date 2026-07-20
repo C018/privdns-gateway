@@ -207,6 +207,19 @@ if [[ -z "$INTERNAL_CIDR" ]]; then
   fi
 fi
 
+# 手机平台: ios | android。一台网关服务一个内网卡手机号, 故平台是每台装机的固定属性。
+# 决定客户端下发方式(iOS 描述文件 / 安卓私密DNS)+ 是否提供 iOS 专属功能(如 MITM 插件, 安卓需 root 故不提供)。
+PLATFORM="${PDG_PLATFORM:-}"
+if [[ -z "$PLATFORM" ]]; then
+  if [[ -n "$NONINT" ]]; then PLATFORM="android"
+  else
+    echo; c_y "你的手机平台?(决定客户端下发 + iOS 专属功能;一台网关对一个手机)"
+    read -rp "平台 [1=iOS / 2=Android, 默认 2]: " _p
+    case "$_p" in 1 | ios | iOS | IOS) PLATFORM=ios;; *) PLATFORM=android;; esac
+  fi
+fi
+[[ "$PLATFORM" == ios || "$PLATFORM" == android ]] || die "PDG_PLATFORM 只能是 ios 或 android"
+
 BOT_TOKEN="${PDG_BOT_TOKEN:-}"; ALLOWED_IDS="${PDG_ALLOWED:-}"; DOT_DOMAIN="${PDG_DOT_DOMAIN:-}"
 if [[ -z "$NONINT" ]]; then
   echo
@@ -268,7 +281,8 @@ esac
 [[ "$HIJACK_MODE" == gfw ]] && HIJACK_SET_FILE="geosite_gfw.txt" || HIJACK_SET_FILE="geosite_geolocation-!cn.txt"
 
 install -d -m700 /etc/privdns-gateway
-printf 'PDG_LOWMEM=%s\nPDG_HIJACK_MODE=%s\n' "$LOWMEM" "$HIJACK_MODE" > /etc/privdns-gateway/profile.env
+printf 'PDG_LOWMEM=%s\nPDG_HIJACK_MODE=%s\nPDG_PLATFORM=%s\n' "$LOWMEM" "$HIJACK_MODE" "$PLATFORM" > /etc/privdns-gateway/profile.env
+printf '%s\n' "$PLATFORM" > /etc/privdns-gateway/platform
 
 render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNAL_CIDR|g" \
               -e "s|__CERT_DIR__|$CERT_DIR|g"   -e "s|__SSH_PORT__|$SSH_PORT|g" \

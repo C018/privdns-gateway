@@ -351,6 +351,16 @@ def _core_svc():
     """活动内核的 systemd 服务名(mihomo / sing-box)。"""
     return "mihomo" if _core_backend() == "mihomo" else "sing-box"
 
+def _platform():
+    """手机平台标记: ios / android(读不到默认 android —— 不启用 iOS 专属的 MITM 等)。"""
+    try:
+        p = open("/etc/privdns-gateway/platform", encoding="utf-8").read().strip()
+        if p in ("ios", "android"):
+            return p
+    except OSError:
+        pass
+    return "android"
+
 def _panel_render_args(model):
     """把 model 的 experimental.clash_api(面板状态)透传给渲染器 —— mihomo 原生 clash API,
     面板开关/secret/external_ui 语义与 sing-box 一致, 无需另建状态。"""

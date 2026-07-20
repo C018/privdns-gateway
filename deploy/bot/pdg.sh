@@ -17,6 +17,8 @@ need_root(){ [[ $EUID -eq 0 ]] || { echo "请用 root: sudo pdg $*"; exit 1; }; 
 # 活动内核后端(mihomo / singbox; 读不到标记默认 singbox)
 _pdg_core(){ local b; b=$(cat /etc/privdns-gateway/backend 2>/dev/null); [[ "$b" == mihomo || "$b" == singbox ]] && echo "$b" || echo singbox; }
 _pdg_core_svc(){ [[ "$(_pdg_core)" == mihomo ]] && echo mihomo || echo sing-box; }
+# 手机平台(ios / android; 读不到默认 android)
+_pdg_platform(){ local p; p=$(cat /etc/privdns-gateway/platform 2>/dev/null); [[ "$p" == ios || "$p" == android ]] && echo "$p" || echo android; }
 
 # 串行化"会写配置/重启服务"的操作(update/rollback/snapshot), 防 bot 更新按钮与命令行并发。
 # 嵌套调用(update→snapshot)只锁一次。read-only 操作(status/doctor/report/log)不加锁。
@@ -172,6 +174,7 @@ cmd_status(){
   done
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  内核后端     $core$([[ "$core" == mihomo ]] && echo "(可更新, 无版本天花板)" || echo "(1.12.x 钉死)")"
+  echo "  手机平台     $(_pdg_platform)"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports p9090="9090(local clash_api)"
   if jq -e '.experimental.clash_api as $c | $c.external_controller == "0.0.0.0:9090" and $c.external_ui == "/etc/sing-box/ui/dist" and (($c.secret // "") | length > 0)' /etc/sing-box/config.json >/dev/null 2>&1; then
