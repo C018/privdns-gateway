@@ -868,6 +868,46 @@ run_all_migrations(){
   migrate_mosdns_ratelimit || true; migrate_lowmem || true; migrate_mihomo_safepaths || true
 }
 
+# 切换劫持模式: all(非CN全劫持) | gfw(只劫持 GFWList 真被墙域名, 非墙海外直连)。换 hijack_set 加载的域名文件。
+cmd_hijack_mode(){
+  need_root hijack-mode
+  local mode="${1:-}" file
+  if [[ "$mode" != all && "$mode" != gfw ]]; then
+    echo "用法: pdg hijack-mode <all|gfw>"
+    echo "  all = 非CN域名全劫持进代理(默认)"
+    echo "  gfw = 只劫持 GFWList 真被墙域名; 非墙海外域名直连(修 SSH/直连走域名被劫持)。前提: 内网卡 SIM 能直达一般互联网"
+    echo "  当前: $(cat /etc/privdns-gateway/profile.env 2>/dev/null | sed -n 's/^PDG_HIJACK_MODE=//p' | tail -1 || echo '?')"
+    return 1
+  fi
+  grep -q 'tag: hijack_set' /etc/mosdns/config.yaml 2>/dev/null \
+    || { echo "❌ 当前 mosdns 配置无 hijack_set(旧版装机)。先 sudo pdg update 到 v1.4.2+ 再切。"; return 1; }
+  if [[ "$mode" == gfw ]]; then
+    file="geosite_gfw.txt"
+    if [[ ! -s /etc/mosdns/rules/geosite_gfw.txt ]]; then
+      c_g "生成 GFWList(geosite_gfw.txt)…"; bash /opt/pdg-bot/update-rules.sh >/dev/null 2>&1 || true
+    fi
+    [[ -s /etc/mosdns/rules/geosite_gfw.txt ]] || { echo "❌ geosite_gfw.txt 生成失败, 仍为原模式"; return 1; }
+  else
+    file="geosite_geolocation-!cn.txt"
+  fi
+  cp /etc/mosdns/config.yaml /etc/mosdns/config.yaml.hjbak
+  # geosite_gfw.txt / geosite_geolocation-!cn.txt 仅 hijack_set 引用, 故全局替换安全
+  sed -i -E "s#/etc/mosdns/rules/geosite_(gfw|geolocation-!cn)\.txt#/etc/mosdns/rules/$file#g" /etc/mosdns/config.yaml
+  systemctl restart mosdns; sleep 1.5
+  if [[ "$(systemctl is-active mosdns 2>/dev/null)" != active ]]; then
+    c_y "mosdns 重启失败 → 还原"; cp /etc/mosdns/config.yaml.hjbak /etc/mosdns/config.yaml
+    systemctl restart mosdns; rm -f /etc/mosdns/config.yaml.hjbak; return 1
+  fi
+  rm -f /etc/mosdns/config.yaml.hjbak
+  install -d -m700 /etc/privdns-gateway
+  if grep -q '^PDG_HIJACK_MODE=' /etc/privdns-gateway/profile.env 2>/dev/null; then
+    sed -i "s/^PDG_HIJACK_MODE=.*/PDG_HIJACK_MODE=$mode/" /etc/privdns-gateway/profile.env
+  else
+    echo "PDG_HIJACK_MODE=$mode" >> /etc/privdns-gateway/profile.env
+  fi
+  echo "✅ 劫持模式 → $mode"
+}
+
 # 下一次以 root 运行"管理类"命令(update/restart/menu/…)时幂等自动迁移防火墙(已迁移则首个 grep 秒退)。
 # 只读命令(status/doctor/log/traffic/report)与卸载不触发, 以保持"只读命令不写任何东西"的语义;
 # 只跑只读命令的用户可显式 `sudo pdg migrate-fw` 迁移(且证书 hook/doctor 已兼容旧 inet filter, 不迁也能用)。
@@ -894,6 +934,7 @@ case "${1:-menu}" in
   ios)           cmd_ios;;
   report)        shift || true; cmd_report "$@";;
   detect-cidr|cidr) shift || true; cmd_detect_cidr "${1:-}";;
+  hijack-mode)   shift || true; cmd_hijack_mode "${1:-}";;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|migrate-fw|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|hijack-mode <all|gfw>|migrate-fw|uninstall [--purge]]";;
 esac

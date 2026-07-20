@@ -438,9 +438,24 @@ def check_deep_upstreams():
         level = max(level, "warn", key=rank.get)
     return (level, "DNS 上游探测", " ; ".join(parts))
 
+def check_mitm():
+    """MITM 插件(Feature B / iOS): 启用时 pdg-mitm 应 active + CA 就位。未启用 = info。"""
+    try:
+        cfg = json.load(open("/etc/privdns-gateway/mitm.json"))
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    enabled = [k for k in ("wloc",) if (cfg.get(k) or {}).get("enabled")]
+    if not enabled:
+        return ("info", "MITM 插件", "未启用")
+    if _run(["systemctl", "is-active", "pdg-mitm"])[1].strip() != "active":
+        return ("fail", "MITM 插件", "已启用(" + ",".join(enabled) + ")但 pdg-mitm 未运行")
+    if not os.path.isfile("/etc/privdns-gateway/ca/ca.crt"):
+        return ("fail", "MITM 插件", "缺 CA 证书 /etc/privdns-gateway/ca/ca.crt")
+    return ("ok", "MITM 插件", "pdg-mitm active + CA 就位(" + ",".join(enabled) + ")")
+
 ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
        check_internal_cidr, check_nft, check_gms, check_mosdns_ratelimit, check_mem,
-       check_cert, check_dns, check_singbox_config]
+       check_cert, check_dns, check_singbox_config, check_mitm]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加
