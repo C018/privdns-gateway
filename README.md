@@ -45,6 +45,21 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 
 入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
 
+### 选择流量内核:sing-box(默认)还是 mihomo
+
+装机时可选内核,**其余一切相同**(DNS 决策 / 单入口 / bot / 面板都不变;出口、分流规则、故障组配置两核通用)。上面那条命令装的是默认 sing-box;要 mihomo 就加 `PDG_CORE=mihomo`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo PDG_CORE=mihomo bash
+```
+
+| 内核 | 特点 | 更新 |
+|---|---|---|
+| **sing-box 1.12.x**(默认) | 稳定、久经实战 | 内核**钉死 1.12.x**——1.13 移除了本网关依赖的 `sniff_override_destination`,内核无法再升级(bot 代码仍可更新) |
+| **mihomo**(clash.meta) | 活跃维护;原生 clash 核,观测面板更顺、UDP/QUIC 更成熟 | 内核**可持续升级**(`sniffer.override-destination` 无版本天花板);`pdg update` / bot 更新按钮会随发布把内核升到最新钉死版 |
+
+> 不确定就用默认 sing-box;想要**内核能一直更新到最新**,就选 mihomo。两者手机端配置(DoT 域名)完全一样。
+
 或克隆后运行(便于先看代码):
 
 ```bash
@@ -108,7 +123,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 | 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被 sing-box 占的坑) |
 | 防火墙 | **nftables** | 对全网只留 SSH;DNS/数据/探测口只放行内网卡来源段 |
 
-> ⚠️ sing-box **必须 1.12.x** —— 1.13 移除了 `sniff_override_destination`,本网关会失效。install.sh 已固定版本。
+> ⚠️ sing-box **必须 1.12.x** —— 1.13 移除了 `sniff_override_destination`,本网关会失效,install.sh 已固定版本。想让内核能持续更新到最新,装机时用 `PDG_CORE=mihomo`(mihomo 无此版本天花板,见上文「选择流量内核」)。
 
 ## 文档
 
