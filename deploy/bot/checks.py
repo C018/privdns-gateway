@@ -8,6 +8,8 @@ MOSDNS_CONF = "/etc/mosdns/config.yaml"
 DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
 BACKEND_MARKER = "/etc/privdns-gateway/backend"
 MIHOMO_CFG = "/etc/mihomo/config.yaml"
+# 面板 UI 在 /etc/sing-box/ui/dist, 不在 mihomo 工作目录下 → SAFE_PATHS 放行, 否则 `mihomo -t` 拒。
+os.environ.setdefault("SAFE_PATHS", "/etc/sing-box/ui/dist")
 
 def _core():
     """活动内核: mihomo / singbox(读不到标记默认 singbox)。"""

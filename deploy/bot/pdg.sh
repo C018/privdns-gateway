@@ -8,6 +8,8 @@ REPO_DIR="/opt/privdns-gateway"
 SVC="/etc/systemd/system/pdg-bot.service"
 ENVD="/etc/privdns-gateway"
 ENVF="$ENVD/bot.env"
+# mihomo 路径安全: 面板 UI 在 /etc/sing-box/ui/dist(不在 /etc/mihomo 下), 放行给本脚本的所有 `mihomo -t` 校验。
+export SAFE_PATHS="${SAFE_PATHS:-/etc/sing-box/ui/dist}"
 
 c_g(){ echo -e "\033[1;32m$*\033[0m"; }
 c_y(){ echo -e "\033[1;33m$*\033[0m"; }
@@ -843,10 +845,21 @@ menu(){
 
 # 老装升级"自愈": 旧版 pdg update 跑的是旧脚本, 不会调用迁移 → 装上新 pdg.sh 后,
 # 全部老装迁移(幂等)。集中一处, 供管理类命令的自愈调用 + cmd_update 装好新脚本后经 `pdg __migrate` 调"新版"。
+# 老装 mihomo: 给 mihomo.service 补 Environment=SAFE_PATHS(面板 UI 在 /etc/sing-box/ui/dist, 不在 -d 下)。幂等。
+migrate_mihomo_safepaths(){
+  [[ "$(_pdg_core)" == mihomo ]] || return 0
+  local unit=/etc/systemd/system/mihomo.service
+  [[ -f "$unit" ]] || return 0
+  grep -q 'SAFE_PATHS' "$unit" && return 0
+  c_g "补 mihomo.service 的 SAFE_PATHS(面板 UI 路径放行)…"
+  sed -i '/^ExecStart=.*mihomo/a Environment=SAFE_PATHS=/etc/sing-box/ui/dist' "$unit"
+  systemctl daemon-reload; systemctl restart mihomo 2>/dev/null || true
+}
+
 run_all_migrations(){
   migrate_botenv || true; migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true
   migrate_mosdns_unlock || true; migrate_singbox_gms || true; migrate_fw_gms || true
-  migrate_mosdns_ratelimit || true; migrate_lowmem || true
+  migrate_mosdns_ratelimit || true; migrate_lowmem || true; migrate_mihomo_safepaths || true
 }
 
 # 下一次以 root 运行"管理类"命令(update/restart/menu/…)时幂等自动迁移防火墙(已迁移则首个 grep 秒退)。

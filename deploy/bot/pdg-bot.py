@@ -11,10 +11,12 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 sing-box 前备份, chec
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, contextlib, fcntl, hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subprocess, tarfile, tempfile, threading, time, uuid
+import base64, contextlib, fcntl, hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subprocess, sys, tarfile, tempfile, threading, time, uuid
 import concurrent.futures
 import urllib.parse, urllib.request, urllib.error
 from collections import Counter
+# 保证能 import 同目录的 sb2mihomo —— 不管本模块是被当脚本跑, 还是被定时任务/健康检查/测试 import。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 TOKEN = os.environ.get("PDG_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("PDG_BOT_ALLOWED", "").replace(" ", "").split(",") if x}
@@ -27,6 +29,10 @@ MIHOMO_DIR = "/etc/mihomo"
 MIHOMO_CFG = MIHOMO_DIR + "/config.yaml"
 MIHOMO_BIN = "mihomo"
 MIHOMO_REDIR = 7893
+# mihomo 有路径安全限制: external-ui 等文件路径须在工作目录(-d)下或 SAFE_PATHS 白名单内。
+# 观测面板 UI 在 /etc/sing-box/ui/dist(与 sing-box 共用), 不在 /etc/mihomo 下 → 用 SAFE_PATHS 放行,
+# 使 mihomo 服务运行 + 本进程发起的所有 `mihomo -t` 校验都认这个 UI 路径。
+os.environ.setdefault("SAFE_PATHS", "/etc/sing-box/ui/dist")
 BACKEND_MARKER = "/etc/privdns-gateway/backend"   # 内容 mihomo / singbox; 读不到则默认 singbox
 PROFILE_ENV = "/etc/privdns-gateway/profile.env"  # 持久化开关(PDG_LOWMEM / PDG_TFO 等)
 MOSDNS_CONF = "/etc/mosdns/config.yaml"

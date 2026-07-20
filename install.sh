@@ -331,6 +331,7 @@ After=network-online.target mosdns.service
 Wants=network-online.target
 [Service]
 ExecStart=/usr/local/bin/mihomo -d /etc/mihomo -f /etc/mihomo/config.yaml
+Environment=SAFE_PATHS=/etc/sing-box/ui/dist
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
