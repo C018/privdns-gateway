@@ -11,7 +11,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 MOSDNS_VER="v5.3.4"
 SINGBOX_VER="1.12.25"         # 必须 1.12.x —— 1.13 移除了 sniff_override_destination, 本网关会失效。1.12.25 = 当前 1.12.x 最高补丁版
-ZASHBOARD_VER="v3.15.0"       # 观测面板(纯静态前端, 由 sing-box external_ui 托管; dist-no-fonts 最小、不依赖 CDN)
+MIHOMO_VER="v1.19.29"         # 可选内核(原型): mihomo/clash.meta, sniffer.override-destination 无版本天花板, 活跃维护可更新
+ZASHBOARD_VER="v3.15.0"       # 观测面板(纯静态前端, 由 external_ui 托管; dist-no-fonts 最小、不依赖 CDN; mihomo 原生 clash 核也可托管)
 
 # key = <name>-<arch>(arch: amd64 / arm64); zashboard 为纯前端, 与架构无关(单一哈希)
 declare -A PDG_SHA256=(
@@ -19,6 +20,9 @@ declare -A PDG_SHA256=(
   [mosdns-arm64]="82d80a1a21606fca0bc6b65ac6f90d30cff6bb4a19a6ab6a246cf247dbb78bc0"
   [singbox-amd64]="a1ec76e2b6b139eb747a1b1ebee7d14b8d4be5a833596cad8070a31ef960301f"
   [singbox-arm64]="719b76196c8b31efa636b2d8f669e314547e0da0a5ab38a75e1882d307bbd154"
+  # mihomo(可选内核): 官方 release 的 mihomo-linux-<arch>-<ver>.gz
+  [mihomo-amd64]="60de76a35a6cbf7b4fa4a20f5c257c24345d1d635ab1aa3877022a1997ef413c"
+  [mihomo-arm64]="9a868b5e4e0ad91d9d71e1b41b0cfce78aaba44360c30df74a723f8e3926a86c"
   [zashboard]="403b351d3663f5fe65db053cb2f3dc980108d8f86e8c6968d56164d3452592e1"
 )
 

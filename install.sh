@@ -100,18 +100,19 @@ rollback(){
     return
   fi
   c_y "安装失败 → 回滚本次全新安装的改动…"
-  systemctl disable --now pdg-bot pdg-probe81 mosdns sing-box \
+  systemctl disable --now pdg-bot pdg-probe81 mosdns sing-box mihomo \
       pdg-rules-update.timer pdg-health.timer 2>/dev/null
-  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
+  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,mihomo,pdg-rules-update,pdg-health}.service \
         /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
         /etc/systemd/journald.conf.d/50-pdg.conf /etc/systemd/system/journald.conf.d/50-pdg.conf   # 正确 + 历史错路径都删
   systemctl daemon-reload 2>/dev/null
   systemctl restart systemd-journald 2>/dev/null || true   # CanReload=no: 必须 restart 才松开封顶
   nft delete table inet pdg 2>/dev/null
-  rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /etc/privdns-gateway
+  rm -rf /etc/mosdns /etc/sing-box /etc/mihomo /opt/pdg-bot /etc/privdns-gateway
   rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
   [[ "$MOSDNS_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mosdns
   [[ "$SINGBOX_INSTALLED" == 1 ]] && rm -f /usr/local/bin/sing-box
+  [[ "$MIHOMO_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mihomo
   # 还原系统级改动(仅全新安装才到这里)
   if [[ -e /etc/nftables.conf.pdg-orig ]]; then
     cp -a /etc/nftables.conf.pdg-orig /etc/nftables.conf 2>/dev/null
@@ -144,17 +145,35 @@ if ! command -v mosdns >/dev/null; then
   rm -rf "$t"
 fi
 
-# ── 3. sing-box 1.12.x ──
-if ! sing-box version 2>/dev/null | grep -q "version 1.12"; then
-  c_g "下载 sing-box $SINGBOX_VER ($MARCH)…"
-  t=$(mktemp -d)
-  curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${MARCH}.tar.gz" -o "$t/sb.tgz"
-  pdg_verify_sha256 "$t/sb.tgz" "${PDG_SHA256[singbox-$MARCH]:-}" "sing-box $SINGBOX_VER ($MARCH)" \
-    || { rm -rf "$t"; die "sing-box 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
-  tar -xzf "$t/sb.tgz" -C "$t"
-  install -m755 "$t"/sing-box-*/sing-box /usr/local/bin/sing-box
-  SINGBOX_INSTALLED=1
-  rm -rf "$t"
+# ── 3. 内核: sing-box 1.12.x(默认)或 mihomo(PDG_CORE=mihomo, 原型)──
+CORE="${PDG_CORE:-singbox}"
+[[ "$CORE" == singbox || "$CORE" == mihomo ]] || die "PDG_CORE 只能是 singbox 或 mihomo"
+if [[ "$CORE" == mihomo ]]; then
+  CORE_SVC=mihomo
+  if ! mihomo -v 2>/dev/null | grep -q "$MIHOMO_VER"; then
+    c_g "下载 mihomo $MIHOMO_VER ($MARCH)…"
+    t=$(mktemp -d)
+    curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/mihomo-linux-${MARCH}-${MIHOMO_VER}.gz" -o "$t/mihomo.gz"
+    pdg_verify_sha256 "$t/mihomo.gz" "${PDG_SHA256[mihomo-$MARCH]:-}" "mihomo $MIHOMO_VER ($MARCH)" \
+      || { rm -rf "$t"; die "mihomo 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
+    gunzip -c "$t/mihomo.gz" > "$t/mihomo"
+    install -m755 "$t/mihomo" /usr/local/bin/mihomo
+    MIHOMO_INSTALLED=1
+    rm -rf "$t"
+  fi
+else
+  CORE_SVC=sing-box
+  if ! sing-box version 2>/dev/null | grep -q "version 1.12"; then
+    c_g "下载 sing-box $SINGBOX_VER ($MARCH)…"
+    t=$(mktemp -d)
+    curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${MARCH}.tar.gz" -o "$t/sb.tgz"
+    pdg_verify_sha256 "$t/sb.tgz" "${PDG_SHA256[singbox-$MARCH]:-}" "sing-box $SINGBOX_VER ($MARCH)" \
+      || { rm -rf "$t"; die "sing-box 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
+    tar -xzf "$t/sb.tgz" -C "$t"
+    install -m755 "$t"/sing-box-*/sing-box /usr/local/bin/sing-box
+    SINGBOX_INSTALLED=1
+    rm -rf "$t"
+  fi
 fi
 
 # ── 4. 收集参数 (env 预置优先; PDG_NONINTERACTIVE=1 则不交互) ──
@@ -213,6 +232,7 @@ install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/sb2mihomo.py        /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
@@ -245,10 +265,27 @@ render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNA
               -e "s|__MOSDNS_CACHE__|$MOSDNS_CACHE|g" -e "s|__JOURNALD_MAXUSE__|$JOURNALD_MAXUSE|g" "$1"; }
 
 render "$REPO_DIR/deploy/mosdns/config.yaml"          > /etc/mosdns/config.yaml
-render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json
+render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json   # 始终是 bot 的数据模型(mihomo 模式下也由它渲染)
 chmod 700 /etc/sing-box; chmod 600 /etc/sing-box/config.json   # config 含出口密码/uuid
 [[ -e /etc/nftables.conf.pdg-orig ]] || cp -a /etc/nftables.conf /etc/nftables.conf.pdg-orig 2>/dev/null || true  # 供 uninstall 还原
-render "$REPO_DIR/deploy/firewall/nftables.conf"      > /etc/nftables.conf
+# 内核后端: 标记 + 防火墙模板(mihomo 用 REDIRECT 入站变体)+ 初始渲染 mihomo 配置
+printf '%s\n' "$CORE" > /etc/privdns-gateway/backend
+if [[ "$CORE" == mihomo ]]; then
+  render "$REPO_DIR/deploy/firewall/nftables-mihomo.conf" > /etc/nftables.conf
+  install -d -m700 /etc/mihomo
+  python3 - <<PY
+import json, os, sys
+sys.path.insert(0, "$REPO_DIR/deploy/bot")
+import sb2mihomo
+model = json.load(open("/etc/sing-box/config.json"))
+cfg, _ = sb2mihomo.singbox_to_mihomo(model, redir_port=7893)
+with open("/etc/mihomo/config.yaml", "w") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)   # JSON 即合法 YAML
+os.chmod("/etc/mihomo/config.yaml", 0o600)
+PY
+else
+  render "$REPO_DIR/deploy/firewall/nftables.conf"      > /etc/nftables.conf
+fi
 render "$REPO_DIR/deploy/bot/pdg-bot.service"         > /etc/systemd/system/pdg-bot.service
 chmod 644 /etc/systemd/system/pdg-bot.service        # 不再含 token (token 在 bot.env)
 
@@ -275,7 +312,22 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-cat > /etc/systemd/system/sing-box.service <<'EOF'
+if [[ "$CORE" == mihomo ]]; then
+  cat > /etc/systemd/system/mihomo.service <<'EOF'
+[Unit]
+Description=mihomo (PrivDNS Gateway core)
+After=network-online.target mosdns.service
+Wants=network-online.target
+[Service]
+ExecStart=/usr/local/bin/mihomo -d /etc/mihomo -f /etc/mihomo/config.yaml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+else
+  cat > /etc/systemd/system/sing-box.service <<'EOF'
 [Unit]
 Description=sing-box
 After=network-online.target
@@ -288,6 +340,7 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 # ── 6. DoT 证书 ──
 if [[ -n "${PDG_SKIP_CERT:-}" ]]; then
@@ -326,7 +379,7 @@ fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-systemctl enable --now mosdns sing-box pdg-probe81 >/dev/null 2>&1 || true
+systemctl enable --now mosdns "$CORE_SVC" pdg-probe81 >/dev/null 2>&1 || true
 systemctl enable --now pdg-rules-update.timer >/dev/null 2>&1 || true
 systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true
 if [[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" ]]; then
@@ -348,7 +401,7 @@ c_g "校验核心服务(需连续保持 active, 防起来又崩)…"
 svc_ok=0; streak=0
 for _ in $(seq 1 20); do
   allact=1
-  for s in mosdns sing-box pdg-probe81; do
+  for s in mosdns "$CORE_SVC" pdg-probe81; do
     [[ "$(systemctl is-active "$s" 2>/dev/null)" == active ]] || allact=0
   done
   if [[ "$allact" == 1 ]]; then streak=$((streak+1)); else streak=0; fi
@@ -356,15 +409,15 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 if [[ "$svc_ok" != 1 ]]; then
-  for s in mosdns sing-box pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
-  journalctl -u mosdns -u sing-box -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
+  for s in mosdns "$CORE_SVC" pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
+  journalctl -u mosdns -u "$CORE_SVC" -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
   die "核心服务未能持续保持运行(见上日志)。"   # → 触发回滚
 fi
 INSTALL_OK=1   # 提交点: 核心服务已确认稳定 active, 后面只是打印, 不再回滚
 
 # ── 10. 自检 ──
 echo; c_g "安装完成。状态:"
-for s in mosdns sing-box pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
+for s in mosdns "$CORE_SVC" pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
   echo; c_y "⚠️ 管理 bot 未启用(没填 token)。出口和分流规则都在 bot 里设——"
   c_y "   现在还没法配代理。先跑:  sudo pdg-set-token  设好 token, 再给 bot 发 /start。"
