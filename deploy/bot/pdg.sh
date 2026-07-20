@@ -12,6 +12,9 @@ ENVF="$ENVD/bot.env"
 c_g(){ echo -e "\033[1;32m$*\033[0m"; }
 c_y(){ echo -e "\033[1;33m$*\033[0m"; }
 need_root(){ [[ $EUID -eq 0 ]] || { echo "请用 root: sudo pdg $*"; exit 1; }; }
+# 活动内核后端(mihomo / singbox; 读不到标记默认 singbox)
+_pdg_core(){ local b; b=$(cat /etc/privdns-gateway/backend 2>/dev/null); [[ "$b" == mihomo || "$b" == singbox ]] && echo "$b" || echo singbox; }
+_pdg_core_svc(){ [[ "$(_pdg_core)" == mihomo ]] && echo mihomo || echo sing-box; }
 
 # 串行化"会写配置/重启服务"的操作(update/rollback/snapshot), 防 bot 更新按钮与命令行并发。
 # 嵌套调用(update→snapshot)只锁一次。read-only 操作(status/doctor/report/log)不加锁。
@@ -161,16 +164,19 @@ pdg_fetch_release_tags(){
 
 cmd_status(){
   c_g "== 服务 =="
-  for s in mosdns sing-box pdg-bot pdg-probe81; do
+  local core; core="$(_pdg_core)"
+  for s in mosdns "$(_pdg_core_svc)" pdg-bot pdg-probe81; do
     printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
+  echo "  内核后端     $core$([[ "$core" == mihomo ]] && echo "(可更新, 无版本天花板)" || echo "(1.12.x 钉死)")"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports p9090="9090(local clash_api)"
   if jq -e '.experimental.clash_api as $c | $c.external_controller == "0.0.0.0:9090" and $c.external_ui == "/etc/sing-box/ui/dist" and (($c.secret // "") | length > 0)' /etc/sing-box/config.json >/dev/null 2>&1; then
     p9090="9090(panel临时内网)"
   fi
-  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9090)\b' | sed 's/^://' | sort -u | sed "s|^9090$|$p9090|" | tr '\n' ' ')
+  # mihomo 模式 443/80 由 nft 转到 7893(redir), 故把 7893 一并纳入端口展示
+  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|7893|8445|9090)\b' | sed 's/^://' | sort -u | sed "s|^9090$|$p9090|" | tr '\n' ' ')
   echo "  监听端口     $ports"
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"; fi
   local lm cache; lm="$(pdg_lowmem_current)"; cache="$(awk '/tag: lazy_cache/{f=1} f&&/size:/{print $2; exit}' /etc/mosdns/config.yaml 2>/dev/null)"
@@ -513,7 +519,7 @@ cmd_snapshot(){
   install -d -m700 "$d"
   # 整机配置 + 防火墙 + bot.env(含 token)+ service + journald 封顶(含历史错路径)(相对 / 打包, 回滚 -C / 解开)
   # 只打包"存在的"路径 —— 历史错路径可能已被迁移清掉, 无条件列进去会让 tar 报 Cannot stat 并返 2。
-  local cand=(etc/mosdns etc/sing-box opt/pdg-bot etc/privdns-gateway etc/nftables.conf
+  local cand=(etc/mosdns etc/sing-box etc/mihomo opt/pdg-bot etc/privdns-gateway etc/nftables.conf
               etc/systemd/system/pdg-bot.service etc/systemd/journald.conf.d/50-pdg.conf
               etc/systemd/system/journald.conf.d/50-pdg.conf)
   local items=(); local p; for p in "${cand[@]}"; do [[ -e "/$p" ]] && items+=("$p"); done
@@ -553,9 +559,11 @@ cmd_rollback(){
   target="${snaps[$idx]}"
   local f="$target/snap.tar.gz"
   [[ -f "$f" ]] || { echo "快照文件缺失: $f"; return 1; }
-  # 先校验快照里的 sing-box / nft 再动手(rule_set 路径临时指向解包目录)
+  # 先校验快照里的 内核配置 / nft 再动手(rule_set 路径临时指向解包目录)
   local tmp; tmp=$(mktemp -d); tar xzf "$f" -C "$tmp"
-  if [[ -f "$tmp/etc/sing-box/config.json" ]]; then
+  if [[ "$(_pdg_core)" == mihomo ]]; then
+    [[ -f "$tmp/etc/mihomo/config.yaml" ]] && { mihomo -t -d "$tmp/etc/mihomo" -f "$tmp/etc/mihomo/config.yaml" >/dev/null 2>&1 || { echo "❌ 快照的 mihomo 配置 check 失败, 中止"; rm -rf "$tmp"; return 1; }; }
+  elif [[ -f "$tmp/etc/sing-box/config.json" ]]; then
     sed "s#/etc/sing-box/rs/#$tmp/etc/sing-box/rs/#g" "$tmp/etc/sing-box/config.json" > "$tmp/sb.chk"
     sing-box check -c "$tmp/sb.chk" >/dev/null 2>&1 || { echo "❌ 快照的 sing-box 配置 check 失败, 中止"; rm -rf "$tmp"; return 1; }
   fi
@@ -567,9 +575,54 @@ cmd_rollback(){
   _sb_sanitize_panel /etc/sing-box/config.json && c_g "  已净化回滚出的面板临时态 → 关闭"
   systemctl daemon-reload
   nft -f /etc/nftables.conf 2>/dev/null || true
-  systemctl restart mosdns sing-box pdg-bot pdg-probe81 2>/dev/null || true
+  systemctl restart mosdns "$(_pdg_core_svc)" pdg-bot pdg-probe81 2>/dev/null || true
   systemctl restart systemd-journald 2>/dev/null || true   # journald CanReload=no: 还原封顶需 restart 才生效
   echo "✅ 已回滚并重启服务"
+}
+
+# 内核二进制更新: 比对 versions.sh 钉死版本与已装版本, 不一致则下载+SHA校验+装。
+# 关键安全: 先备份旧二进制, 用新二进制对现有配置跑 check, 通过才切换/重启; 失败还原旧版, 不留坏内核。
+_update_core_binary(){
+  local core march ver tmp prev=""
+  core="$(_pdg_core)"
+  # shellcheck source=/dev/null
+  source "$REPO_DIR/lib/versions.sh" 2>/dev/null || { c_y "读不到 versions.sh, 跳过内核更新"; return 0; }
+  march=$(dpkg --print-architecture 2>/dev/null); [[ "$march" == arm64 ]] || march=amd64
+  tmp=$(mktemp -d)
+  if [[ "$core" == mihomo ]]; then
+    ver="$MIHOMO_VER"
+    mihomo -v 2>/dev/null | grep -q "$ver" && { rm -rf "$tmp"; return 0; }   # 已是钉死版本
+    c_g "更新 mihomo 内核 → $ver …"
+    curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${ver}/mihomo-linux-${march}-${ver}.gz" -o "$tmp/m.gz" \
+      || { c_y "  下载失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+    pdg_verify_sha256 "$tmp/m.gz" "${PDG_SHA256[mihomo-$march]:-}" "mihomo $ver ($march)" \
+      || { c_y "  SHA 校验失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+    gunzip -c "$tmp/m.gz" > "$tmp/mihomo" || { c_y "  解压失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+    prev="/usr/local/bin/mihomo.prev"; cp -a /usr/local/bin/mihomo "$prev" 2>/dev/null
+    install -m755 "$tmp/mihomo" /usr/local/bin/mihomo
+    if mihomo -t -d /etc/mihomo -f /etc/mihomo/config.yaml >/dev/null 2>&1; then
+      rm -f "$prev"; systemctl restart mihomo 2>/dev/null || true; c_g "  → mihomo $ver 已装并重启"
+    else
+      [[ -f "$prev" ]] && mv "$prev" /usr/local/bin/mihomo; c_y "  新版与当前配置不兼容(check 失败), 已还原旧版内核"
+    fi
+  else
+    ver="$SINGBOX_VER"
+    sing-box version 2>/dev/null | grep -q "version $ver" && { rm -rf "$tmp"; return 0; }
+    c_g "更新 sing-box 内核 → $ver …"
+    curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${march}.tar.gz" -o "$tmp/sb.tgz" \
+      || { c_y "  下载失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+    pdg_verify_sha256 "$tmp/sb.tgz" "${PDG_SHA256[singbox-$march]:-}" "sing-box $ver ($march)" \
+      || { c_y "  SHA 校验失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+    tar -xzf "$tmp/sb.tgz" -C "$tmp" || { c_y "  解压失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+    prev="/usr/local/bin/sing-box.prev"; cp -a /usr/local/bin/sing-box "$prev" 2>/dev/null
+    install -m755 "$tmp"/sing-box-*/sing-box /usr/local/bin/sing-box
+    if sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
+      rm -f "$prev"; systemctl restart sing-box 2>/dev/null || true; c_g "  → sing-box $ver 已装并重启"
+    else
+      [[ -f "$prev" ]] && mv "$prev" /usr/local/bin/sing-box; c_y "  新版与当前配置不兼容, 已还原旧版内核"
+    fi
+  fi
+  rm -rf "$tmp"
 }
 
 cmd_update(){
@@ -604,6 +657,7 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/sb2mihomo.py        /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
@@ -615,13 +669,19 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
   # 迁移用"刚装好的新脚本"跑(本进程还是旧 bash, 直接调会用旧版函数 → 新迁移要等下次命令才生效)。
   bash /usr/local/bin/pdg __migrate
+  # 内核二进制: 按 versions.sh 钉死版本更新(mihomo 可持续升版; sing-box 仍钉 1.12.x)。
+  _update_core_binary
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
   if ! python3 -m py_compile /opt/pdg-bot/*.py 2>/dev/null; then
     c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback 0; return 1
   fi
-  if ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
+  if [[ "$(_pdg_core)" == mihomo ]]; then
+    if ! mihomo -t -d /etc/mihomo -f /etc/mihomo/config.yaml >/dev/null 2>&1; then
+      c_y "mihomo 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
+    fi
+  elif ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
     c_y "sing-box 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
   fi
   if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then
@@ -660,7 +720,7 @@ cmd_update(){
 
 cmd_token(){ need_root token; pdg-set-token; }   # 不 exec, 设完/取消都回菜单
 
-cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-probe81"; }
+cmd_restart(){ need_root restart; local svc; svc="$(_pdg_core_svc)"; systemctl restart mosdns "$svc" pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / $svc / pdg-bot / pdg-probe81"; }
 
 cmd_log(){ journalctl -u pdg-bot -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
 

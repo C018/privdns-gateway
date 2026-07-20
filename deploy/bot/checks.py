@@ -6,6 +6,21 @@ import os, re, json, ipaddress, subprocess, urllib.request
 SB = "/etc/sing-box/config.json"
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
+BACKEND_MARKER = "/etc/privdns-gateway/backend"
+MIHOMO_CFG = "/etc/mihomo/config.yaml"
+
+def _core():
+    """活动内核: mihomo / singbox(读不到标记默认 singbox)。"""
+    try:
+        b = open(BACKEND_MARKER, encoding="utf-8").read().strip()
+        if b in ("mihomo", "singbox"):
+            return b
+    except OSError:
+        pass
+    return "singbox"
+
+def _core_svc():
+    return "mihomo" if _core() == "mihomo" else "sing-box"
 
 def _run(cmd, t=10):
     try:
@@ -55,12 +70,18 @@ def _dot_file():
         return ""
 
 def check_services():
-    bad = [s for s in ("mosdns", "sing-box", "pdg-bot", "pdg-probe81")
-           if _run(["systemctl", "is-active", s])[1].strip() != "active"]
+    svc = _core_svc()
+    names = ("mosdns", svc, "pdg-bot", "pdg-probe81")
+    bad = [s for s in names if _run(["systemctl", "is-active", s])[1].strip() != "active"]
     return ("fail", "服务", "未运行: " + ", ".join(bad)) if bad \
-        else ("ok", "服务", "mosdns/sing-box/pdg-bot/pdg-probe81 都在")
+        else ("ok", "服务", "/".join(names) + " 都在")
 
 def check_singbox_version():
+    if _core() == "mihomo":
+        _, out, _ = _run(["mihomo", "-v"])
+        m = re.search(r"v?(\d+\.\d+\.\d+)", out or "")
+        return ("ok", "mihomo 版本", "v" + m.group(1) + " ✓(无版本天花板, 可更新)") if m \
+            else ("warn", "mihomo 版本", "读不到版本")
     _, out, _ = _run(["sing-box", "version"])
     m = re.search(r"version\s+(\d+)\.(\d+)", out)
     if not m:
@@ -140,6 +161,17 @@ def check_nft():
 def check_gms():
     """GMS/FCM 推送端口(5228-5230)是否完整启用。只读、不触发迁移: 老装第一次 pdg update
     跑在旧脚本里, 迁移要等下一次 root 管理类命令; 没落地前用 warn 提示(不 fail, 自定义防火墙用户合法缺席)。"""
+    if _core() == "mihomo":
+        # mihomo: 5228-5230 由 nft prerouting REDIRECT 到 redir 端口 + sniffer 处理, 不在 input accept
+        _, pre, _ = _run(["nft", "list", "chain", "inet", "pdg", "prerouting"])
+        if not pre:
+            try:
+                pre = open("/etc/nftables.conf").read()
+            except OSError:
+                pre = ""
+        ok_mh = any("saddr" in ln and "5228" in ln and "redirect" in ln for ln in pre.splitlines())
+        return ("ok", "GMS 推送", "GMS/FCM 5228-5230 已启用(nft REDIRECT→mihomo 嗅探)") if ok_mh \
+            else ("warn", "GMS 推送", "mihomo 模式 5228-5230 未在 nft prerouting REDIRECT, 检查防火墙模板是否生效。")
     try:
         have = {i.get("listen_port") for i in json.load(open(SB)).get("inbounds", [])}
     except Exception:  # noqa: BLE001
@@ -243,6 +275,10 @@ def check_dns():
         else ("fail", "本机DNS", "127.0.0.1:53 不应答(mosdns?)")
 
 def check_singbox_config():
+    if _core() == "mihomo":
+        rc, out, err = _run(["mihomo", "-t", "-d", "/etc/mihomo", "-f", MIHOMO_CFG], t=20)
+        return ("ok", "mihomo 配置", "check 通过") if rc == 0 \
+            else ("fail", "mihomo 配置", "check 失败: " + (out + err)[-200:])
     rc, out, err = _run(["sing-box", "check", "-c", SB], t=20)
     return ("ok", "sing-box 配置", "check 通过") if rc == 0 \
         else ("fail", "sing-box 配置", "check 失败: " + (out + err)[-200:])

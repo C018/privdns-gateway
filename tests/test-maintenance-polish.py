@@ -54,7 +54,7 @@ assert "临时观测/控制面板" in install_doc and "临时观测/控制面板
     "install and production docs should document the temporary panel boundary"
 )
 
-rollback = block_after(pdg, "cmd_rollback()", window=1600)
+rollback = block_after(pdg, "cmd_rollback()", window=2000)
 assert '[[ "$idx" =~ ^[0-9]+$ ]]' in rollback, "rollback index should reject non-numeric input"
 assert 'idx >= ${#snaps[@]}' in rollback, "rollback index should reject out-of-range input"
 
