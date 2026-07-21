@@ -575,15 +575,26 @@ _sb_sanitize_panel(){
 
 SNAP_DIR="/var/lib/privdns-gateway/backups"
 
+# 供 cmd_update 读取"本次刚创建的快照目录"(精确回滚目标, 不靠 index 0 猜)。
+_PDG_SNAP_CREATED=""
 cmd_snapshot(){
   need_root snapshot; _lock
+  _PDG_SNAP_CREATED=""
   local ts d; ts=$(date +%Y%m%d-%H%M%S); d="$SNAP_DIR/$ts"
   install -d -m700 "$d"
   # 整机配置 + 防火墙 + bot.env(含 token)+ service + journald 封顶(含历史错路径)(相对 / 打包, 回滚 -C / 解开)
+  # 含: 已安装脚本(pdg / pdg-set-token / cert hook)+ 全部 pdg unit —— 升级会改它们, 回滚要一并还原。
   # 只打包"存在的"路径 —— 历史错路径可能已被迁移清掉, 无条件列进去会让 tar 报 Cannot stat 并返 2。
   local cand=(etc/mosdns etc/sing-box etc/mihomo opt/pdg-bot etc/privdns-gateway etc/nftables.conf
               etc/systemd/system/pdg-bot.service etc/systemd/journald.conf.d/50-pdg.conf
-              etc/systemd/system/journald.conf.d/50-pdg.conf)
+              etc/systemd/system/journald.conf.d/50-pdg.conf
+              etc/systemd/system/mihomo.service etc/systemd/system/sing-box.service
+              etc/systemd/system/pdg-mitm.service etc/systemd/system/pdg-probe81.service
+              etc/systemd/system/pdg-rules-update.service etc/systemd/system/pdg-rules-update.timer
+              etc/systemd/system/pdg-health.service etc/systemd/system/pdg-health.timer
+              etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
+              usr/local/bin/pdg usr/local/bin/pdg-set-token
+              usr/local/bin/proxy-gateway-open-cert-http.sh usr/local/bin/proxy-gateway-restore-firewall.sh)
   local items=(); local p; for p in "${cand[@]}"; do [[ -e "/$p" ]] && items+=("$p"); done
   # 面板受管开启态: 用净化后的 config 入档(排除真实 config.json, 追加净化版), 快照不含临时监听/密钥/UI。
   local stg=""
@@ -607,6 +618,7 @@ cmd_snapshot(){
     c_y "❌ 快照打包失败"; rm -f "$d/snap.tar.gz"; rmdir "$d" 2>/dev/null; return 1
   fi
   chmod 600 "$d/snap.tar.gz"
+  _PDG_SNAP_CREATED="$d"
   echo "✅ 快照: $d/snap.tar.gz"
   ls -1dt "$SNAP_DIR"/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf   # 只留最近 10 份
 }
@@ -614,14 +626,27 @@ cmd_snapshot(){
 cmd_rollback(){
   need_root rollback; _lock
   local pre_core; pre_core="$(_pdg_core)"   # 回滚前正在运行的内核(跨内核回滚要据此停旧核)
-  local snaps; mapfile -t snaps < <(ls -1dt "$SNAP_DIR"/*/ 2>/dev/null)
-  [[ ${#snaps[@]} -gt 0 ]] || { echo "没有快照(先 pdg snapshot)"; return 1; }
-  echo "可用快照(新→旧):"; local i=0; for s in "${snaps[@]}"; do echo "  [$i] $(basename "$s")"; i=$((i+1)); done
-  local idx="${1:-0}" target
-  [[ "$idx" =~ ^[0-9]+$ ]] || { echo "无效序号 $idx"; return 1; }
-  idx=$((10#$idx))
-  (( idx >= ${#snaps[@]} )) && { echo "无效序号 $idx"; return 1; }
-  target="${snaps[$idx]}"
+  # 参数: <序号>(默认0) | --dir <快照目录>(精确指定, 供 update 用) | --git <ref>(回滚后把 REPO_DIR 复位到该提交)
+  local idx="" dir="" git_ref="" target
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 || { echo "--dir 缺参数"; return 1; };;
+      --git) git_ref="${2:-}"; shift 2 || { echo "--git 缺参数"; return 1; };;
+      *) idx="$1"; shift;;
+    esac
+  done
+  if [[ -n "$dir" ]]; then
+    target="$dir"; [[ -d "$target" ]] || { echo "指定快照目录不存在: $target"; return 1; }
+  else
+    local snaps; mapfile -t snaps < <(ls -1dt "$SNAP_DIR"/*/ 2>/dev/null)
+    [[ ${#snaps[@]} -gt 0 ]] || { echo "没有快照(先 pdg snapshot)"; return 1; }
+    echo "可用快照(新→旧):"; local i=0; for s in "${snaps[@]}"; do echo "  [$i] $(basename "$s")"; i=$((i+1)); done
+    idx="${idx:-0}"
+    [[ "$idx" =~ ^[0-9]+$ ]] || { echo "无效序号 $idx"; return 1; }
+    idx=$((10#$idx))
+    (( idx >= ${#snaps[@]} )) && { echo "无效序号 $idx"; return 1; }
+    target="${snaps[$idx]}"
+  fi
   local f="$target/snap.tar.gz"
   [[ -f "$f" ]] || { echo "快照文件缺失: $f"; return 1; }
   # 先完整解包、净化并校验临时树，再把同一棵树落盘；坏包/净化失败不碰现网。
@@ -631,7 +656,7 @@ cmd_rollback(){
   if ! mkdir -p "$tree" || ! tar tzf "$f" > "$members" 2>/dev/null || [[ ! -s "$members" ]]; then
     echo "❌ 快照目录或成员清单读取失败, 中止"; rm -rf "$tmp"; return 1
   fi
-  if grep -Eq '(^/|(^|/)\.\.(/|$))' "$members" || grep -Evq '^(etc|opt)(/|$)' "$members"; then
+  if grep -Eq '(^/|(^|/)\.\.(/|$))' "$members" || grep -Evq '^(etc|opt|usr/local/bin)(/|$)' "$members"; then
     echo "❌ 快照含越界路径, 中止"; rm -rf "$tmp"; return 1
   fi
   if ! tar xzf "$f" -C "$tree" 2>/dev/null; then
@@ -680,7 +705,21 @@ cmd_rollback(){
   fi
   systemctl is-enabled pdg-mitm >/dev/null 2>&1 && { systemctl reset-failed pdg-mitm 2>/dev/null; systemctl restart pdg-mitm 2>/dev/null; }   # iOS/WLOC: 清 start-limit + 一并恢复 MITM 服务
   systemctl restart systemd-journald 2>/dev/null || true   # journald CanReload=no: 还原封顶需 restart 才生效
-  echo "✅ 已回滚并重启服务"
+  # 仓库 Git 复位(update 回滚: 让 REPO_DIR 与还原出的旧脚本版本一致); 记录未能恢复项, 不谎报"完全回滚"
+  local unrestored=()
+  if [[ -n "$git_ref" ]]; then
+    if [[ -d "$REPO_DIR/.git" ]] && git -C "$REPO_DIR" reset --hard -q "$git_ref" 2>/dev/null; then
+      c_g "  仓库已复位到 ${git_ref:0:12}"
+    else
+      unrestored+=("仓库Git($git_ref)")
+    fi
+  fi
+  if [[ ${#unrestored[@]} -eq 0 ]]; then
+    echo "✅ 已回滚并重启服务"
+  else
+    c_y "⚠️ 已回滚配置/服务, 但以下项未能恢复(未完全回滚): ${unrestored[*]}"
+    return 1
+  fi
 }
 
 # 内核二进制更新: 比对 versions.sh 钉死版本与已装版本, 不一致则下载+SHA校验+装。
@@ -739,7 +778,12 @@ cmd_update(){
     return 0
   fi
   _lock   # 取锁(嵌套的 cmd_snapshot 不会重复锁)
-  c_g "更新前留快照…"; cmd_snapshot >/dev/null 2>&1 || true
+  c_g "更新前留快照…"
+  if ! cmd_snapshot >/dev/null 2>&1 || [[ -z "$_PDG_SNAP_CREATED" || ! -f "$_PDG_SNAP_CREATED/snap.tar.gz" ]]; then
+    c_y "❌ 更新前快照失败, 中止更新(拒绝在无法回滚的前提下继续)。"; return 1
+  fi
+  local snap_dir="$_PDG_SNAP_CREATED"                                    # 精确回滚目标(不靠 index 0 猜)
+  local pre_sha; pre_sha="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)"   # 升级前精确提交, 回滚据此复位仓库
   c_g "拉取最新发布 tag…"
   [[ -d "$REPO_DIR/.git" ]] || { rm -rf "$REPO_DIR"; git clone -q "$REPO_URL" "$REPO_DIR"; }
   if ! pdg_fetch_release_tags "$REPO_DIR"; then
@@ -781,17 +825,17 @@ cmd_update(){
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
   if ! python3 -m py_compile /opt/pdg-bot/*.py 2>/dev/null; then
-    c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
   if [[ "$(_pdg_core)" == mihomo ]]; then
     if ! mihomo -t -d /etc/mihomo -f /etc/mihomo/config.yaml >/dev/null 2>&1; then
-      c_y "mihomo 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
+      c_y "mihomo 配置 check 失败, 回滚…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
     fi
   elif ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
-    c_y "sing-box 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
+    c_y "sing-box 配置 check 失败, 回滚…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
   if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then
-    c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
+    c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
   systemctl daemon-reload
   systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
@@ -803,7 +847,7 @@ cmd_update(){
   local token_set=0
   [[ -f "$ENVF" ]] && grep -qE '^PDG_BOT_TOKEN=.+' "$ENVF" && grep -qE '^PDG_BOT_ALLOWED=.+' "$ENVF" && token_set=1
   if [[ "$token_set" == 1 && "$(systemctl is-active pdg-bot 2>/dev/null)" != "active" ]]; then
-    c_y "pdg-bot 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "pdg-bot 更新后起不来, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
 
   # doctor 自检: 有 fail 回滚, warn 仅提示 (未配 token 时把"服务: 未运行: pdg-bot"这单一项排除, 避免误判)
@@ -817,7 +861,7 @@ cmd_update(){
     if [[ "${fails:-0}" -gt 0 ]]; then
       c_y "自检发现 $fails 项失败, 回滚到更新前快照:"
       echo "$j" | jq -r '.[] | select(.level=="fail") | "  ❌ \(.check): \(.detail)"'
-      cmd_rollback 0; return 1
+      cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
     fi
     [[ "${warns:-0}" -gt 0 ]] && { c_y "自检有 $warns 项警告(不回滚, 仅提示):"
       echo "$j" | jq -r '.[] | select(.level=="warn") | "  ⚠️ \(.check): \(.detail)"'; }
