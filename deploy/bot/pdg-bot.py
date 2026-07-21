@@ -582,9 +582,13 @@ def _core_apply():
     返回 (ok, errtext, restarted): restarted 标明核心是否已被重启(决定回滚要不要再重启)。"""
     if _core_backend() == "mihomo":
         try:
-            _render_mihomo_file()
+            meta = _render_mihomo_file()
         except Exception as e:  # noqa: BLE001  渲染失败(未知协议/写盘): 视为校验失败, 核心未动
             return False, "渲染 mihomo 配置失败(%s)" % type(e).__name__, False
+        # 有出口 mihomo 无法无损转换 → 拒绝(否则会被静默丢弃, mihomo -t 仍会通过而出口凭空消失)
+        bad = (meta or {}).get("unknown_proxies")
+        if bad:
+            return False, "有出口 mihomo 无法转换(会被静默丢弃): %s" % ", ".join(str(x) for x in bad), False
         chk = sh([MIHOMO_BIN, "-t", "-d", MIHOMO_DIR, "-f", MIHOMO_CFG])
         if chk.returncode != 0:
             return False, "mihomo 配置校验失败:\n" + (chk.stdout + chk.stderr)[-400:], False

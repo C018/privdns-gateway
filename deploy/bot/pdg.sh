@@ -1003,9 +1003,10 @@ cmd_switch_core(){
     fi
     install -d -m700 /etc/mihomo
     printf 'mihomo\n' > /etc/privdns-gateway/backend      # 先切标记, 让渲染/迁移按 mihomo 走
-    if ! ( cd /opt/pdg-bot && python3 -c "import bot; bot._render_mihomo_file()" ) 2>/dev/null \
+    # 渲染前先拦: 有出口 mihomo 无法无损转换(unknown_proxies)→ 拒绝切换, 免得切过去出口凭空少一个
+    if ! ( cd /opt/pdg-bot && python3 -c 'import bot,sys; m=bot._render_mihomo_file(); sys.exit(3 if (m and m.get("unknown_proxies")) else 0)' ) 2>/dev/null \
        || ! mihomo -t -d /etc/mihomo -f /etc/mihomo/config.yaml >/dev/null 2>&1; then
-      printf 'singbox\n' > /etc/privdns-gateway/backend; echo "❌ 渲染/校验 mihomo 配置失败, 已回滚标记, 未切换"; return 1
+      printf 'singbox\n' > /etc/privdns-gateway/backend; echo "❌ 渲染/校验 mihomo 配置失败(或有出口 mihomo 无法转换), 已回滚标记, 未切换"; return 1
     fi
     cat > /etc/systemd/system/mihomo.service <<'EOF'
 [Unit]

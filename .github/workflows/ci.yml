@@ -121,6 +121,9 @@ jobs:
       - name: "sb2mihomo 渲染层回归 (sing-box 配置→mihomo 各协议/组/规则映射)"
         run: python3 tests/test-sb2mihomo.py
 
+      - name: "Hysteria v1/v2 转换回归 (v1→hysteria, v2→hysteria2, 不支持→拒绝, 真 mihomo -t)"
+        run: python3 tests/test-hysteria-convert.py
+
       - name: "bot 内核后端切换回归 (mihomo/singbox 分支 + apply_sb 事务回滚)"
         run: python3 tests/test-mihomo-backend.py
 

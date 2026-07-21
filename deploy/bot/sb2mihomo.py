@@ -105,8 +105,39 @@ def convert_proxy(ob):
             p["flow"] = ob["flow"]
         _tls_common(ob, p); _transport_common(ob, p)
         return p
-    if typ in ("hysteria2", "hysteria"):
-        p = {**base, "type": "hysteria2", "password": ob.get("password", ob.get("auth_str", "")), "udp": True}
+    if typ == "hysteria":
+        # Hysteria v1 与 v2 是**不同协议**(不同握手/鉴权/拥塞), mihomo 各有独立 type,
+        # 不能把 v1 塞进 hysteria2(会静默连不上)。v1 → mihomo type:hysteria。
+        p = {**base, "type": "hysteria", "udp": True}
+        if ob.get("auth_str"):            # 字符串鉴权 → auth-str
+            p["auth-str"] = ob["auth_str"]
+        elif ob.get("auth"):              # base64 字节鉴权 → auth
+            p["auth"] = ob["auth"]
+        # 带宽: sing-box up/down(字符串)或 up_mbps/down_mbps(整数 Mbps)→ mihomo up/down
+        up = ob.get("up") or (f"{ob['up_mbps']} Mbps" if ob.get("up_mbps") else None)
+        down = ob.get("down") or (f"{ob['down_mbps']} Mbps" if ob.get("down_mbps") else None)
+        if up:
+            p["up"] = up
+        if down:
+            p["down"] = down
+        if ob.get("obfs"):                # v1 obfs 是字符串(区别于 v2 的 {type,password})
+            p["obfs"] = ob["obfs"]
+        if ob.get("protocol"):            # udp(默认)/faketcp/wechat-video
+            p["protocol"] = ob["protocol"]
+        sni = _sni(ob)
+        if sni:
+            p["sni"] = sni
+        if (ob.get("tls") or {}).get("insecure"):
+            p["skip-cert-verify"] = True
+        if (ob.get("tls") or {}).get("alpn"):
+            p["alpn"] = list(ob["tls"]["alpn"])
+        if ob.get("recv_window_conn"):
+            p["recv-window-conn"] = ob["recv_window_conn"]
+        if ob.get("recv_window"):
+            p["recv-window"] = ob["recv_window"]
+        return p
+    if typ == "hysteria2":
+        p = {**base, "type": "hysteria2", "password": ob.get("password", ""), "udp": True}
         sni = _sni(ob)
         if sni:
             p["sni"] = sni
