@@ -176,6 +176,7 @@ import ssl as _ssl                               # noqa: E402
 
 _RESOLVERS = ["8.8.8.8", "1.1.1.1", "223.5.5.5"]
 _ipcache = {}                                     # host -> (ip, ts)
+_ssl_ctx = _ssl.create_default_context()          # 复用一个 TLS 上下文(线程安全), 别每次转发都重建(重复加载 CA)
 
 
 def _try_fields(data):
@@ -266,15 +267,17 @@ def _dns_a(host, server, timeout=4):
         d, _ = s.recvfrom(1024)
     finally:
         s.close()
+    if len(d) < 12:
+        return None
     i = 12
-    while d[i]:
+    while i < len(d) and d[i]:                      # 跳过 QNAME(带长度前缀)——带边界, 畸形响应不越界
         i += 1 + d[i]
-    i += 5
-    while i + 12 <= len(d):
-        i += 2
-        typ = struct.unpack(">H", d[i:i + 2])[0]; i += 8
-        rdlen = struct.unpack(">H", d[i:i + 2])[0]; i += 2
-        if typ == 1 and rdlen == 4:
+    i += 5                                          # 0 结尾 + QTYPE(2) + QCLASS(2)
+    while i + 12 <= len(d):                         # 每条 answer: NAME 指针(2)+TYPE(2)+CLASS(2)+TTL(4)+RDLEN(2)
+        typ = struct.unpack(">H", d[i + 2:i + 4])[0]
+        rdlen = struct.unpack(">H", d[i + 10:i + 12])[0]
+        i += 12
+        if typ == 1 and rdlen == 4 and i + 4 <= len(d):
             return ".".join(map(str, d[i:i + 4]))
         i += rdlen
     return None
@@ -330,9 +333,10 @@ def _forward(host, head, body):
                + (b"\r\n".join(keep) + b"\r\n" if keep else b"")
                + b"Content-Length: " + str(len(body)).encode()
                + b"\r\nConnection: close\r\n\r\n" + body)
+        raw = None
         try:
             raw = _socket.create_connection((ip, 443), timeout=10)
-            tls = _ssl.create_default_context().wrap_socket(raw, server_hostname=up)
+            tls = _ssl_ctx.wrap_socket(raw, server_hostname=up)
             tls.sendall(req)
             buf = b""                              # 先读到响应头结束
             while b"\r\n\r\n" not in buf:
@@ -343,7 +347,6 @@ def _forward(host, head, body):
             rhead, _, rbody = buf.partition(b"\r\n\r\n")
             rlines = rhead.split(b"\r\n")
             if b" 200" not in rlines[0]:
-                raw.close()
                 seen.append("%s→%s" % (up, rlines[0][:40].decode("latin1", "ignore"))); continue
             if b"chunked" in rhead.lower():        # 按 chunked / Content-Length 读完就停(不等 close)
                 while b"0\r\n\r\n" not in rbody[-16:]:
@@ -365,9 +368,14 @@ def _forward(host, head, body):
                     if not d:
                         break
                     rbody += d
-            raw.close()
         except Exception as e:                    # noqa: BLE001
             seen.append("%s(%s)异常:%s" % (up, ip, type(e).__name__)); continue
+        finally:
+            if raw is not None:
+                try:
+                    raw.close()
+                except Exception:                 # noqa: BLE001
+                    pass
         ctype = b"application/x-protobuf"
         for ln in rlines[1:]:
             if ln.lower().startswith(b"content-type:"):

@@ -2,6 +2,11 @@
 
 本项目按语义化 `v1.x` tag 正式发布;以下按版本/日期记录主要变化,完整提交见 git 历史。
 
+## 2026-07-22 — v1.5.6(WLOC MITM 代码质量 + 文案微调)
+
+- **改**:`_forward` 转发用 try/finally 兜 socket,异常路径不再泄漏 fd;TLS 上下文提到模块级复用(不每次转发重建、少重复加载 CA);`_dns_a` 加边界防越界(畸形响应返 None 不崩)。
+- **文案**:WLOC「还原位置与隐私」步骤 → 「仅首次 / 后续无法改定位时」+「重启手机」;去掉「国内约1分钟/跨国几分钟」那句。README + bot 同步。
+
 ## 2026-07-22 — v1.5.5(修 mihomo 缺 TG 代理入站 + WLOC 使用文案)
 
 - **修**:切到 mihomo 内核后 **Telegram 独立代理(:8445)不通** —— sb2mihomo 只渲染了 direct 入站(靠 nft REDIRECT),漏了 sing-box 的 `mixed` 入站(TG 代理),且 `inbound:[tg-proxy]→出口` 的路由被丢弃。现渲染成 mihomo `listeners`(mixed)+ `IN-NAME` 规则 pin 到其出口(空则跟 final)。真机 `mihomo -t` 校验通过。
