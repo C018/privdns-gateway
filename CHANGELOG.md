@@ -2,6 +2,17 @@
 
 本项目按语义化 `v1.x` tag 正式发布;以下按版本/日期记录主要变化,完整提交见 git 历史。
 
+## 2026-07-21 — v1.5.0(可选 mihomo 双核 + 一键切换内核 + 平台选择 + iOS 位置改写 WLOC)
+
+本版把「流量内核」做成**可选双核**,并新增 iOS **网络定位改写(WLOC)**。
+
+- **可选 mihomo 内核 + 一键切换**:装机 `PDG_CORE=mihomo`,或 bot / CLI **`pdg switch-core`** 在 sing-box ↔ mihomo 间**无损切换**(出口 / 分流 / 证书 / DoT / 规则全不动,只换内核 + 防火墙入站模型,失败自动回滚)。mihomo 无 sing-box 1.12 的版本天花板、可持续更新;`pdg update` 按 `lib/versions.sh` 钉死版本(SHA 校验)更新内核。新增 sing-box→mihomo 配置渲染层(sb2mihomo),覆盖各协议 / 组 / 规则集映射。
+- **装机选平台(iOS / Android)**:一机一号,装机时选平台;iOS 才装 `pdg-mitm` 服务。
+- **iOS 位置改写(WLOC,可选)**:把 iPhone 的**网络定位**改写到设定城市,**手机零 App**(系统 DoT + 信任网关 CA)。网关截 `gs-loc.apple.com` / `gs-loc-cn.apple.com`,**转发真 Apple 拿回真响应、只 patch 坐标**(格式 100% 保真,iOS 才接受)。bot「🍏 位置改写」管**多地点**(增删 / 一键热切换)。真机验证:内网卡 + 控制中心关 WiFi 下国内 / 跨国城市均可切。配方与限制见 README / [docs/design-mitm-plugins.md](docs/design-mitm-plugins.md)。
+- **GFWList 劫持模式运行时切换**:`pdg hijack-mode` / bot 在「只劫被墙域名」与「全量」间切,SSH 到未被墙域名不被劫持。
+- **修**:`pdg doctor` 限流(client_limiter)检查正则不容忍配置里的行内注释,导致全新安装误报 🟡;已修。
+- `doctor` / `status` / `snapshot` / `rollback` / `update` / `uninstall` 全部 core-aware;新增 `pdg switch-core` / `pdg hijack-mode`。
+
 ## 2026-07-20 — v1.4.2(可选 GFWList 劫持模式)
 
 - **增**:装机开关 `PDG_HIJACK_MODE=all(默认,行为不变) | gfw`,决定哪些海外域名的 A 记录被劫持到网关进代理。
