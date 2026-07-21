@@ -42,6 +42,7 @@ pdg switch-core mihomo     # 渲染 + 切换 + 自检
 ```
 - [ ] 切换成功、不回滚;`systemctl is-active mihomo` = active。
 - [ ] **所有入站都在**:`ss -tlnp | grep -E ':(80|443|5228|8445)'` —— 尤其 **:8445(TG 代理)有人听**(mixed 入站漏渲染的老坑)。
+- [ ] **bot「🚦 测出口」每个出口都返回延迟、不报「超时/不通」** —— 尤其 **direct 出口(jp)**(它在 mihomo 里映射成内建 `DIRECT`,clash 里没有该 tag 名的老坑)。
 - [ ] 若配了 Telegram 出口:客户端连 `网关IP:8445` 能上网,且走的是选定出口。
 - [ ] `pdg switch-core singbox` 切回,同样全绿、:8445 仍在听。
 
