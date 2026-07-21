@@ -26,6 +26,7 @@ def main():
     bot.apply_sb = lambda mod: (True, "")                 # 不起真核心
     bot.sh = lambda cmd: types.SimpleNamespace(returncode=0, stdout="", stderr="")
     bot._mitm_ca_pem = lambda: ""                          # 跳过 CA 生成
+    bot._core_backend = lambda: "mihomo"                   # WLOC 硬门控: 默认按 mihomo 内核(可开)
 
     # ── 安卓平台: 拒绝 ──
     bot._platform = lambda: "android"
@@ -36,6 +37,15 @@ def main():
     bot._platform = lambda: "ios"
     okr, msg = bot.set_wloc(True)
     assert okr is False and "坐标" in msg; ok("iOS 无坐标开启 → 提示先设坐标")
+
+    # ── 硬门控: sing-box 内核上开启 WLOC 被拒(不假成功、不持久化 enabled) ──
+    bot._core_backend = lambda: "singbox"
+    okr, msg = bot.wloc_enable(True)
+    assert okr is False and "mihomo" in msg; ok("sing-box 内核开启 WLOC 被硬门控拒绝(指向 mihomo)")
+    assert not (json.load(open(bot.MITM_CONFIG)).get("wloc", {}).get("enabled")
+                if os.path.exists(bot.MITM_CONFIG) else False); ok("硬门控拒绝后未持久化 enabled=true")
+    okr, _ = bot.wloc_enable(False); assert okr is True; ok("sing-box 上关闭 WLOC 仍允许(关不受门控)")
+    bot._core_backend = lambda: "mihomo"
 
     # ── 设坐标 + 开启(兼容旧 set_wloc: 存成"默认"地点)──
     okr, msg = bot.set_wloc(True, lat=35.6812, lon=139.7671)

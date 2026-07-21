@@ -543,6 +543,12 @@ def wloc_enable(on):
     """开/关 WLOC(开启需已有激活地点)。"""
     if _platform() != "ios":
         return False, "位置改写(WLOC)仅 iOS 平台可用(安卓需 root, 且走 Google 定位, 不支持)。"
+    # 硬门控: WLOC 的 MITM 路由(接管域名 → 本地 socks5 7894)只有 mihomo 内核会渲染。
+    # sing-box 模型即运行配置(无独立渲染层), 加 MITM-OUT 会污染用户配置 → 暂不支持,
+    # 明确拒绝(不假成功): 关是随时允许的, 只拦"在 sing-box 上开启"。
+    if on and _core_backend() != "mihomo":
+        return False, ("位置改写(WLOC/MITM)目前仅 mihomo 内核支持 —— sing-box 无 MITM 路由层。\n"
+                       "请先切到 mihomo 内核(菜单「🔀 切换内核」或 `sudo pdg switch-core mihomo`)再开启。")
     w = _wloc_state()
     if on and not _wloc_active(w):
         return False, "请先「➕ 添加地点」设一个坐标再开启。"
@@ -2693,7 +2699,8 @@ def handle_cb(chat, mid, data):
             edit(chat, mid, "位置改写(WLOC)仅 iOS 平台可用。", OPS_BACK); return
         w = _wloc_state(); on = bool(w.get("enabled")); loc = _wloc_active(w)
         cur = f"<b>{w['active']}</b>({loc['lat']}, {loc['lon']})" if loc else "未设"
-        edit(chat, mid, f"🍏 <b>位置改写 (WLOC)</b>\n状态: <b>{'🟢 开启' if on else '关闭'}</b>　当前: {cur}　地点: {len(w['locations'])} 个\n"
+        gate = "" if _core_backend() == "mihomo" else "\n⚠️ 当前内核为 sing-box, WLOC 仅 mihomo 支持 —— 先「🔀 切换内核」到 mihomo 再开启。"
+        edit(chat, mid, f"🍏 <b>位置改写 (WLOC)</b>\n状态: <b>{'🟢 开启' if on else '关闭'}</b>　当前: {cur}　地点: {len(w['locations'])} 个{gate}\n"
              "把 iPhone 网络定位改写到设定城市(国内 / 跨国均可)。需先装并信任本网关 CA(在「📱 客户端 → iOS 描述文件」)。\n"
              "<b>手机端操作</b>(全程用内网卡):\n"
              "① <b>控制中心</b>关 WiFi(把图标点灰,<b>不是「设置」里关</b>——设置里关会连 Wi-Fi 定位扫描一起关掉)\n"

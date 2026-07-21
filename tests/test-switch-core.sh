@@ -107,6 +107,10 @@ pdg_unit_mihomo | grep -q 'Environment=SAFE_PATHS=/etc/sing-box/ui/dist' && ok "
 grep -q 'pdg_write_unit pdg_unit_mihomo' "$ROOT/install.sh" && grep -q 'pdg_write_unit pdg_unit_mihomo' "$ROOT/deploy/bot/pdg.sh" \
   && ok "install.sh 与 switch-core 均用 pdg_write_unit pdg_unit_mihomo(无手写漂移)" || bad "两处未统一到 units.sh"
 
+# ── F. WLOC 硬门控: 切回 sing-box 前拦 WLOC 开启态(Item 6) ────────────────────
+grep -q 'WLOC.*正开启.*sing-box' "$ROOT/deploy/bot/pdg.sh" && grep -q 'wloc.*enabled' "$ROOT/deploy/bot/pdg.sh" \
+  && ok "switch-core: WLOC 开着时拒绝切回 sing-box(不失去 MITM 路由)" || bad "缺 WLOC 切核硬门控"
+
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $nfail"
 [[ "$nfail" == 0 ]]

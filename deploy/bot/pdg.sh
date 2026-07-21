@@ -1071,6 +1071,12 @@ cmd_switch_core(){
   cur="$(_pdg_core)"
   [[ "$cur" == "$target" ]] && { echo "已经是 $target 内核。"; return 0; }
   [[ -f /etc/mihomo/config.yaml || -f "$REPO_DIR/deploy/bot/sb2mihomo.py" ]] || { echo "❌ 缺 mihomo 支持文件, 先 sudo pdg update。"; return 1; }
+  # 硬门控: WLOC(MITM 位置改写)只有 mihomo 有路由层。WLOC 开着时切回 sing-box 会静默失去
+  # 位置改写 → 拒绝, 要求先关 WLOC(不假成功)。
+  if [[ "$target" == singbox ]] \
+     && [[ "$(python3 -c 'import json;print(bool(json.load(open("/etc/privdns-gateway/mitm.json")).get("wloc",{}).get("enabled")))' 2>/dev/null)" == True ]]; then
+    echo "❌ WLOC(位置改写)正开启 —— 切回 sing-box 会失去 MITM 路由。请先在 TG bot 关闭 WLOC 再切。"; return 1
+  fi
   c_g "切换内核 $cur → $target(出口/分流/证书/DoT 均不动)…"
   cmd_snapshot >/dev/null 2>&1 || true
   march=$(dpkg --print-architecture 2>/dev/null); [[ "$march" == arm64 ]] || march=amd64
