@@ -76,8 +76,11 @@ if [[ -z "${MD:-}" && -n "$ARCH" ]]; then
 fi
 if [[ -n "${MD:-}" ]] && command -v dig >/dev/null; then
   mkdir -p "$WORK/rules"; for f in geosite_cn geosite_apple custom_direct unlock; do : > "$WORK/rules/$f.txt"; done
+  echo "example.com" > "$WORK/rules/geosite_geolocation-!cn.txt"   # 劫持集: example.com 及子域被劫持到本机(黑洞), 限流实测不依赖外网
+  : > "$WORK/rules/mitm_hijack.txt"
   sed -e "s|__SERVER_IP__|10.0.0.9|g" -e "s|__INTERNAL_CIDR__|127.0.0.0/8|g" \
       -e "s|__CERT_DIR__|$WORK/certs|g" -e "s|__MOSDNS_CACHE__|8192|g" \
+      -e "s|__HIJACK_SET_FILE__|geosite_geolocation-!cn.txt|g" \
       "$ROOT/deploy/mosdns/config.yaml" > "$WORK/r.yaml"
   sed -i -e "s#/etc/mosdns/rules/#$WORK/rules/#g" -e 's#0.0.0.0:53#127.0.0.1:15353#g' \
          -e 's#qps: 200, burst: 400#qps: 3, burst: 3#' "$WORK/r.yaml"
@@ -88,6 +91,9 @@ f=sys.argv[1]; s=open(f).read()
 s=re.sub(r'  - tag: dot_server\n(?:.*\n)*?    args:.*\n','',s)
 open(f,'w').write(s)
 PY
+  # 通用断言: 渲染后不得残留占位符(漏渲染=mosdns 加载失败 → 限流实测被迫 SKIP)
+  leftover="$(grep -oE '__[A-Z_]+__' "$WORK/r.yaml" | sort -u | tr '\n' ' ')"
+  [[ -z "$leftover" ]] && ok "渲染无残留占位符" || bad "渲染后残留占位符: $leftover"
   "$MD" start -c "$WORK/r.yaml" > "$WORK/mosdns.out" 2>&1 & PIDS+=($!)
   rdy=0; for _ in $(seq 1 30); do dig +short +time=1 +tries=1 @127.0.0.1 -p 15353 rdy.test A >/dev/null 2>&1 && { rdy=1; break; }; sleep 0.2; done
   if [[ "$rdy" == 1 ]]; then
@@ -101,9 +107,11 @@ PY
     st=$(dig @127.0.0.1 -p 15353 "slow.example.com" A 2>/dev/null | grep -oE 'status: [A-Z]+' | head -1)
     [[ "$st" == *NOERROR* ]] && ok "限额内查询正常(NOERROR)" || bad "限额内查询异常: $st"
   else
-    echo "[SKIP] mosdns 未就绪, 跳过限流实测"; sed 's/^/  mosdns| /' "$WORK/mosdns.out" | head -5
+    # 有 mosdns+dig 却起不来 = 配置渲染/启动失败, 必须硬失败(不得靠 SKIP 制造绿色)
+    bad "mosdns 未就绪(配置渲染/启动失败, 非环境问题)"; sed 's/^/  mosdns| /' "$WORK/mosdns.out" | head -20
   fi
 else
+  # 仅当 mosdns/dig 二进制真的不存在(环境缺失, 非配置问题)才跳过实测
   echo "[SKIP] 无 mosdns/dig, 跳过限流实测(迁移与 doctor 已覆盖)"
 fi
 

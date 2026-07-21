@@ -67,6 +67,8 @@ echo "qq.com" > "$WORK/rules/geosite_cn.txt"
 : > "$WORK/rules/geosite_apple.txt"
 : > "$WORK/rules/custom_direct.txt"
 echo "domain:unlktest.example" > "$WORK/rules/unlock.txt"
+echo "example.com" > "$WORK/rules/geosite_geolocation-!cn.txt"   # 劫持集(all 模式=geolocation-!cn): 代理域名在集内 → 被劫持
+: > "$WORK/rules/mitm_hijack.txt"                                # MITM 接管域名(force_hijack): 本测试无, 留空
 
 # ── 渲染真实 config.yaml → 测试版(上游指 mock, 端口换高位, 去掉 DoT server 省证书)──
 MOCK_UP="{addr: \"udp://127.0.0.1:$MOCKP\"}"
@@ -74,7 +76,7 @@ render_conf(){   # $1=内网段  $2=local 上游内联(默认=单 mock; 故障�
   local local_ups="${2:-$MOCK_UP}"
   # 按上游里的特征 IP 区分 remote(1.1.1.1)/local(223.5.5.5) 整行替换(兼容 concurrent: 前缀)。
   sed -e "s/__SERVER_IP__/$SERVER_IP/g" -e "s#__INTERNAL_CIDR__#$1#g" -e "s#__CERT_DIR__#$WORK#g" \
-      -e "s#__MOSDNS_CACHE__#8192#g" \
+      -e "s#__MOSDNS_CACHE__#8192#g" -e "s#__HIJACK_SET_FILE__#geosite_geolocation-!cn.txt#g" \
       "$ROOT/deploy/mosdns/config.yaml" \
     | sed -e "s#^\([[:space:]]*\)args: {.*1\.1\.1\.1.*}#\1args: { concurrent: 2, upstreams: [ $MOCK_UP ] }#" \
           -e "s#^\([[:space:]]*\)args: {.*223\.5\.5\.5.*}#\1args: { concurrent: 2, upstreams: [ $local_ups ] }#" \
@@ -83,6 +85,9 @@ render_conf(){   # $1=内网段  $2=local 上游内联(默认=单 mock; 故障�
           -e "s#0.0.0.0:53#127.0.0.1:$DNSP#g" \
           -e "/- tag: dot_server/,\$d" \
       > "$WORK/config.yaml"
+  # 通用断言: 渲染后不得残留任何 __XXX__ 占位符(漏渲染=mosdns 加载失败/规则错位)
+  local leftover; leftover="$(grep -oE '__[A-Z_]+__' "$WORK/config.yaml" | sort -u | tr '\n' ' ')"
+  [[ -z "$leftover" ]] || fail "渲染后残留占位符: $leftover"
 }
 
 start_mosdns(){   # 重启 mosdns 加载当前 config

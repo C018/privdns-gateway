@@ -59,7 +59,7 @@ grep -q '__MOSDNS_CACHE__' "$ROOT/deploy/mosdns/config.yaml" && ok "模板用占
 
 # ── C. 迁移(旧装: 已渲染成 8192 的配置 + 50M journald)──────────────────────
 sed -e 's/__SERVER_IP__/10.0.0.9/g' -e 's#__INTERNAL_CIDR__#127.0.0.0/8#g' -e 's#__CERT_DIR__#/tmp/c#g' \
-    -e 's/__MOSDNS_CACHE__/8192/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mos.yaml"
+    -e 's/__MOSDNS_CACHE__/8192/g' -e 's/__HIJACK_SET_FILE__/geosite_geolocation-!cn.txt/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mos.yaml"
 sed 's/__JOURNALD_MAXUSE__/50M/' "$ROOT/deploy/firewall/journald-50-pdg.conf" > "$WORK/jrnl.conf"
 printf 'PDG_LOWMEM=1\n' > "$WORK/prof.env"     # 低内存 profile
 
@@ -80,7 +80,7 @@ eq "$(awk '/tag: lazy_cache/{f=1} f&&/size:/{print $2; exit}' "$WORK/mos.yaml")"
 
 # 生成器失败(python3 返回非0)→ 原配置不变、不重启 mosdns
 sed -e 's/__SERVER_IP__/10.0.0.9/g' -e 's#__INTERNAL_CIDR__#127.0.0.0/8#g' -e 's#__CERT_DIR__#/tmp/c#g' \
-    -e 's/__MOSDNS_CACHE__/8192/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mosf.yaml"
+    -e 's/__MOSDNS_CACHE__/8192/g' -e 's/__HIJACK_SET_FILE__/geosite_geolocation-!cn.txt/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mosf.yaml"
 printf '[Journal]\nSystemMaxUse=20M\n' > "$WORK/jrnlok.conf"   # 已是目标, journald 迁移不触发(隔离 mosdns 重启计数)
 printf 'PDG_LOWMEM=1\n' > "$WORK/prof.env"
 # 只数 mosdns 重启(journald 重启不算), 以隔离验证; journald 文件故意缺 RuntimeMaxUse, 用于证明 journald 仍被修
@@ -101,7 +101,7 @@ grep -qxE 'RuntimeMaxUse=20M' "$WORK/jgen.conf" && ok "mosdns 失败不连累 jo
 
 # 原子替换(mv)失败 → 配置不变、不重启 mosdns、清临时文件; journald 仍被修
 sed -e 's/__SERVER_IP__/10.0.0.9/g' -e 's#__INTERNAL_CIDR__#127.0.0.0/8#g' -e 's#__CERT_DIR__#/tmp/c#g' \
-    -e 's/__MOSDNS_CACHE__/8192/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mosm.yaml"
+    -e 's/__MOSDNS_CACHE__/8192/g' -e 's/__HIJACK_SET_FILE__/geosite_geolocation-!cn.txt/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mosm.yaml"
 before="$(md5sum "$WORK/mosm.yaml" | awk '{print $1}')"
 printf '[Journal]\nSystemMaxUse=20M\n' > "$WORK/jgen2.conf"
 out=$(PDG_PROFILE="$WORK/prof.env" PDG_MEMINFO="$WORK/mem512" bash -c "
@@ -118,7 +118,7 @@ grep -qxE 'RuntimeMaxUse=20M' "$WORK/jgen2.conf" && ok "mv 失败不连累 journ
 
 # journald 装错目录的历史残留 → 清掉 + 正确目录补建目标值(旧装迁移场景)
 sed -e 's/__SERVER_IP__/10.0.0.9/g' -e 's#__INTERNAL_CIDR__#127.0.0.0/8#g' -e 's#__CERT_DIR__#/tmp/c#g' \
-    -e 's/__MOSDNS_CACHE__/8192/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mosj.yaml"
+    -e 's/__MOSDNS_CACHE__/8192/g' -e 's/__HIJACK_SET_FILE__/geosite_geolocation-!cn.txt/g' "$ROOT/deploy/mosdns/config.yaml" > "$WORK/mosj.yaml"
 printf '[Journal]\nSystemMaxUse=50M\n' > "$WORK/legacyj.conf"   # 装错目录里有旧文件
 rm -f "$WORK/correctj.conf"                                     # 正确目录没有
 printf 'PDG_LOWMEM=0\n' > "$WORK/prof.env"                      # 标准 → 目标 50M
