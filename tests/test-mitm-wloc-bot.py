@@ -27,6 +27,12 @@ def main():
     bot.sh = lambda cmd: types.SimpleNamespace(returncode=0, stdout="", stderr="")
     bot._mitm_ca_pem = lambda: ""                          # 跳过 CA 生成
     bot._core_backend = lambda: "mihomo"                   # WLOC 硬门控: 默认按 mihomo 内核(可开)
+    def _fake_transact(w):                                 # 本测试聚焦状态管理; 事务机制(回滚/故障注入)另见 test-mitm-wloc-txn.py
+        bot._wloc_save(w)
+        doms = bot._mitm_enabled_domains()
+        bot._atomic_write_text(bot.MITM_HIJACK_FILE, "".join("domain:" + d + "\n" for d in doms))
+        return True, ""
+    bot._mitm_transact = _fake_transact
 
     # ── 安卓平台: 拒绝 ──
     bot._platform = lambda: "android"

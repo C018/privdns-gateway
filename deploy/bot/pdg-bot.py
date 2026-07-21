@@ -458,17 +458,87 @@ def _mitm_ca_pem():
     except Exception:  # noqa: BLE001
         return ""
 
-def _mitm_sync():
-    """按启用插件同步: 写 mitm_hijack.txt(接管域名)+ 重启 pdg-mitm 载插件 + 重渲染 mihomo + 重启 mosdns 载 force_hijack。"""
-    doms = _mitm_enabled_domains()
-    with open(MITM_HIJACK_FILE, "w") as f:
-        f.write("".join("domain:" + d + "\n" for d in doms))
-    if doms:
-        _mitm_ca_pem()                       # 确保 CA 已生成(供叶子签发 + iOS 下发)
-    sh(["systemctl", "restart", "pdg-mitm"])
-    ok, msg = apply_sb(lambda c: None)       # 重渲染 mihomo(mitm_domains)+ 重启核心
-    sh(["systemctl", "restart", "mosdns"])   # 载入 force_hijack 域名集
-    return ok, msg
+def _read_bytes(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None            # 文件本不存在 → 回滚时应删除(而非写空)
+
+def _restore_bytes(path, data):
+    """把 path 还原成 data(None=删除)。原子: 临时文件 + os.replace。"""
+    if data is None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    t = path + ".tmp"
+    with open(t, "wb") as f:
+        f.write(data)
+    os.replace(t, path)
+
+def _atomic_write_text(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    t = path + ".tmp"
+    with open(t, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(t, path)
+
+def _mitm_transact(new_wloc):
+    """事务化落地 WLOC/MITM 目标态(new_wloc = _wloc_save 结构)。单锁内完成, 任一步失败全量回滚。
+    顺序: 备份旧 mitm.json+hijack → 写新 mitm.json → CA(有域名)→ 写 hijack → 渲染内核+校验+稳定active
+          → pdg-mitm 稳定active(有域名)/停(无) → mosdns 重启+稳定active。
+    保证: 绝不『返回失败但新态(含 enabled)已持久化』, 也绝不『服务失败却返回成功』。返回 (ok, msg)。"""
+    with _cfg_guard() as got:
+        if not got:
+            return False, BUSY_MSG
+        old_mitm = _read_bytes(MITM_CONFIG)
+        old_hijack = _read_bytes(MITM_HIJACK_FILE)
+
+        def _restore():
+            _restore_bytes(MITM_CONFIG, old_mitm)                     # 回滚 mitm.json(含 enabled)
+            _restore_bytes(MITM_HIJACK_FILE, old_hijack if old_hijack is not None else b"")
+            try:
+                _apply_sb_inner(lambda c: None)                      # 用还原后的 hijack 重渲染内核回旧态
+            except Exception:  # noqa: BLE001
+                pass
+            if _mitm_enabled_domains():                              # 恢复 pdg-mitm 到旧态
+                sh(["systemctl", "reset-failed", "pdg-mitm"]); sh(["systemctl", "restart", "pdg-mitm"])
+            else:
+                sh(["systemctl", "stop", "pdg-mitm"])
+            sh(["systemctl", "reset-failed", "mosdns"]); sh(["systemctl", "restart", "mosdns"])
+
+        try:
+            _wloc_save(new_wloc)                                     # 1. 写新 mitm.json(原子, 内部 os.replace)
+            doms = _mitm_enabled_domains()
+            if doms:                                                # 2. CA(有域名才需)
+                try:
+                    import mitm_ca
+                    mitm_ca.ensure_ca()
+                    mitm_ca.prewarm(doms)                           # 预热两 gs-loc 叶子证书(免首连抖动)
+                except Exception as e:  # noqa: BLE001
+                    _restore(); return False, "MITM 根 CA 生成失败(%s), 已回滚。" % type(e).__name__
+            _atomic_write_text(MITM_HIJACK_FILE,                    # 3. 写 hijack(原子)
+                               "".join("domain:" + d + "\n" for d in doms))
+            ok, err = _apply_sb_inner(lambda c: None)               # 4. 渲染内核 + 校验 + 稳定 active
+            if not ok:
+                _restore(); return False, "内核应用失败(%s), 已回滚。" % (err or "")
+            if doms:                                                # 5. pdg-mitm 稳定 active
+                sh(["systemctl", "reset-failed", "pdg-mitm"])
+                r = sh(["systemctl", "restart", "pdg-mitm"])
+                if r.returncode != 0 or not _svc_active("pdg-mitm"):
+                    _restore(); return False, "pdg-mitm 未稳定运行, 已回滚。"
+            else:
+                sh(["systemctl", "stop", "pdg-mitm"])
+            sh(["systemctl", "reset-failed", "mosdns"])             # 6. mosdns 重启 + 稳定 active
+            r = sh(["systemctl", "restart", "mosdns"])
+            if r.returncode != 0 or not _svc_active("mosdns"):
+                _restore(); return False, "mosdns 未稳定运行, 已回滚。"
+            return True, ""
+        except Exception as e:  # noqa: BLE001
+            _restore(); return False, "MITM 应用异常(%s), 已回滚。" % type(e).__name__
 
 def _wloc_state():
     """归一化 WLOC 配置(迁移老单坐标格式)→ {enabled, accuracy, active, locations:[{name,lat,lon}]}。"""
@@ -520,8 +590,7 @@ def wloc_del(name):
         w["active"] = w["locations"][0]["name"] if w["locations"] else None
         if not w["active"]:
             w["enabled"] = False
-    _wloc_save(w)
-    ok, msg = _mitm_sync()
+    ok, msg = _mitm_transact(w)          # 事务化(内部写 mitm.json): 失败则不落新态, 回滚旧态
     return (True, f"✅ 已删除 <b>{name}</b>") if ok else (False, msg)
 
 def wloc_switch(name):
@@ -530,11 +599,12 @@ def wloc_switch(name):
     if not any(l["name"] == name for l in w["locations"]):
         return False, "没有这个地点"
     w["active"] = name
-    _wloc_save(w)
     if w.get("enabled"):
-        ok, msg = _mitm_sync()
+        ok, msg = _mitm_transact(w)      # 开启中: 事务化热切坐标(失败回滚, active 不变脏)
         if not ok:
             return False, msg
+    else:
+        _wloc_save(w)                    # 未开启: 只存, 不动服务
     loc = _wloc_active(w)
     tail = "" if w.get("enabled") else "\n(WLOC 未开启, 点「开启」才生效)"
     return True, f"✅ 已切到 <b>{name}</b>({loc['lat']}, {loc['lon']})" + tail
@@ -553,8 +623,7 @@ def wloc_enable(on):
     if on and not _wloc_active(w):
         return False, "请先「➕ 添加地点」设一个坐标再开启。"
     w["enabled"] = bool(on)
-    _wloc_save(w)
-    ok, msg = _mitm_sync()
+    ok, msg = _mitm_transact(w)          # 事务化: 失败则 enabled 不被持久化(回滚), 不留"返回失败却 enabled=true"
     if not ok:
         return False, msg
     if on:
@@ -628,6 +697,13 @@ def apply_sb(modify):
     with _cfg_guard() as got:
         if not got:
             return False, BUSY_MSG
+        return _apply_sb_inner(modify)
+
+def _apply_sb_inner(modify):
+    """apply_sb 的**不含锁**主体。供 _mitm_transact 事务在同一把 _cfg_guard 内复用 ——
+    _cfg_guard 非可重入(非阻塞 threading.Lock + 非阻塞 flock), 事务里再调 apply_sb 会 BUSY,
+    故事务先持锁一次, 内核步走这里。"""
+    if True:
         shutil.copy(SB, SB + ".botbak"); os.chmod(SB + ".botbak", 0o600)
         wrote = False
         try:
