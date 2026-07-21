@@ -1018,11 +1018,97 @@ migrate_deploy_botfiles(){
   done
 }
 
+# 老装(v1.4.x, WLOC 之前)迁移: 给 mosdns 补 MITM 接管结构 —— force_hijack domain_set +
+# force_hijack_seq + internal_sequence 里的优先级规则 + 空 mitm_hijack.txt。平时空文件=休眠, 零影响。
+# 只认标准结构(有 internal_sequence + geosite_cn 优先级锚点 + 可提取的网关 IP); 自定义配置不强改(交 doctor)。
+# 幂等(已有 force_hijack 即退); 备份→生成→校验重启→失败还原。$1 可指定文件(供测试)。
+# shellcheck disable=SC2120
+migrate_mosdns_mitm(){
+  local f="${1:-/etc/mosdns/config.yaml}"
+  [[ -f "$f" ]] || return 0
+  grep -q 'tag: force_hijack' "$f" && return 0                          # 已有 → 幂等退出
+  grep -q 'tag: internal_sequence' "$f" && grep -q 'tag: ecs_china' "$f" || return 0   # 非本项目形态 → 不动
+  grep -qE '^\s+- matches: qname \$geosite_cn' "$f" || return 0         # 缺优先级锚点 → 不动(交 doctor warn)
+  local sip; sip="$(grep -oE 'black_hole [0-9.]+' "$f" | head -1 | awk '{print $2}')"
+  [[ -n "$sip" ]] || { c_y "  [MITM迁移] 提取网关IP失败(未渲染?), 跳过(交 doctor)。"; return 0; }
+  # 规则目录从现有 geosite_cn 路径推导(生产=/etc/mosdns/rules; 测试=临时目录), 保证注入路径与实际文件一致
+  local rdir; rdir="$(grep -oE '"/[^"]*/geosite_cn\.txt"' "$f" | head -1 | tr -d '"')"
+  rdir="$(dirname "$rdir" 2>/dev/null)"; [[ -n "$rdir" && "$rdir" != "." ]] || rdir="/etc/mosdns/rules"
+  c_g "补 mosdns MITM 接管结构(force_hijack, 平时空文件=休眠)…"
+  install -d -m755 "$rdir" 2>/dev/null || true
+  [[ -e "$rdir/mitm_hijack.txt" ]] || : > "$rdir/mitm_hijack.txt"   # 空接管集(休眠)
+  local bak; bak="$f.premitm.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "  备份失败(磁盘满?), 中止、不动现网。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  if ! python3 - "$f" "$sip" "$rdir" <<'PY'
+import sys
+f, sip, rdir = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(f).read()
+# 1. force_hijack domain_set(锚点: ecs_china 定义行之前)
+ds = ('  - tag: force_hijack\n'
+      '    type: domain_set\n'
+      '    args: { files: ["%s/mitm_hijack.txt"] }\n'
+      '  - tag: ecs_china') % rdir
+assert s.count('  - tag: ecs_china') == 1, 'ecs_china 锚点不唯一'
+s = s.replace('  - tag: ecs_china', ds, 1)
+# 2. force_hijack_seq(锚点: internal_sequence 定义行之前); black_hole 用真实网关 IP
+seq = ('  - tag: force_hijack_seq\n'
+       '    type: sequence\n'
+       '    args:\n'
+       '      - matches: qtype 28\n'
+       '        exec: reject 0\n'
+       '      - matches: qtype 65\n'
+       '        exec: reject 0\n'
+       '      - exec: jump has_resp\n'
+       '      - matches: qtype 1\n'
+       '        exec: black_hole %s\n'
+       '  - tag: internal_sequence') % sip
+assert s.count('  - tag: internal_sequence') == 1, 'internal_sequence 锚点不唯一'
+s = s.replace('  - tag: internal_sequence', seq, 1)
+# 3. 优先级规则(锚点: 第一个 geosite_cn 匹配之前, 即 CN 判定前强制接管)
+anchor = '      - matches: qname $geosite_cn'
+rule = ('      - matches: qname $force_hijack\n'
+        '        exec: goto force_hijack_seq\n' + anchor)
+i = s.find(anchor)
+assert i != -1, 'geosite_cn 锚点缺失'
+s = s[:i] + rule + s[i + len(anchor):]
+open(f, 'w').write(s)
+PY
+  then c_y "  生成失败 → 还原。"; cp -a "$bak" "$f"; return 0; fi
+  # 校验: 若装了 mosdns 就真起一遍确认可加载, 否则只留新配置(测试环境无 mosdns)
+  if command -v mosdns >/dev/null 2>&1 && systemctl list-units --all 2>/dev/null | grep -q mosdns.service; then
+    systemctl restart mosdns 2>/dev/null; sleep 1
+    if [[ "$(systemctl is-active mosdns 2>/dev/null)" == active ]]; then
+      c_g "  ✅ 已补 force_hijack(MITM 接管结构)。"
+    else
+      c_y "  ⚠️ mosdns 重启失败 → 还原。"; cp -a "$bak" "$f" 2>/dev/null; systemctl restart mosdns 2>/dev/null
+    fi
+  else
+    c_g "  ✅ 已补 force_hijack(未起 mosdns 校验: 本机无 mosdns 服务)。"
+  fi
+}
+
+# 老装迁移: iOS 平台补 pdg-mitm 服务(MITM 插件宿主)。仅 iOS; Android 不建。
+# 需 mitm_server.py 已就位(靠 migrate_deploy_botfiles 先补)。幂等(已有 unit 且 enabled 即退)。
+migrate_pdg_mitm_service(){
+  [[ "$(_pdg_platform)" == ios ]] || return 0                          # 仅 iOS; Android 无 MITM
+  [[ -f /etc/systemd/system/pdg-mitm.service ]] && systemctl is-enabled pdg-mitm >/dev/null 2>&1 && return 0
+  [[ -f /opt/pdg-bot/mitm_server.py ]] || return 0                     # MITM 服务代码未就位 → 下轮 botfiles 迁移后再补
+  # shellcheck source=/dev/null
+  source "$REPO_DIR/lib/units.sh" 2>/dev/null || return 0
+  pdg_write_unit pdg_unit_pdg_mitm /etc/systemd/system/pdg-mitm.service
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl reset-failed pdg-mitm 2>/dev/null; systemctl enable --now pdg-mitm >/dev/null 2>&1 || true
+  c_g "  ✅ 已补 iOS pdg-mitm 服务(MITM 插件宿主)。"
+}
+
 run_all_migrations(){
   migrate_botenv || true; migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true
   migrate_mosdns_unlock || true; migrate_singbox_gms || true; migrate_fw_gms || true
   migrate_mosdns_ratelimit || true; migrate_lowmem || true; migrate_mihomo_safepaths || true
   migrate_deploy_botfiles || true
+  migrate_mosdns_mitm || true; migrate_pdg_mitm_service || true
 }
 
 # 内核切换: sing-box <-> mihomo。出口/分流/证书/DoT/mosdns 全不动(model 共用), 只换内核二进制 +

@@ -54,7 +54,7 @@ assert "临时观测/控制面板" in install_doc and "临时观测/控制面板
     "install and production docs should document the temporary panel boundary"
 )
 
-rollback = block_after(pdg, "cmd_rollback()", window=3800)   # harden + core-aware 合并后函数更大
+rollback = block_after(pdg, "cmd_rollback()", window=4800)   # harden + core-aware + 跨内核 + --dir/--git 精确回滚后更大
 assert '[[ "$idx" =~ ^[0-9]+$ ]]' in rollback, "rollback index should reject non-numeric input"
 assert 'idx >= ${#snaps[@]}' in rollback, "rollback index should reject out-of-range input"
 
@@ -69,7 +69,7 @@ assert "status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm|__migrate)" 
 )
 
 # P2-2: snapshot 包含 journald drop-in(正确+历史错路径), rollback 重启 journald
-snapshot = block_after(pdg, "cmd_snapshot()", window=1800)
+snapshot = block_after(pdg, "cmd_snapshot()", window=2600)   # cand 扩到含已装脚本 + 全部 unit 后更长
 assert "etc/systemd/journald.conf.d/50-pdg.conf" in snapshot, "snapshot must include journald drop-in (correct path)"
 assert "etc/systemd/system/journald.conf.d/50-pdg.conf" in snapshot, "snapshot should also capture legacy wrong-path file"
 assert "systemctl restart systemd-journald" in rollback, (

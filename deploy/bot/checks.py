@@ -450,8 +450,34 @@ def check_deep_upstreams():
         level = max(level, "warn", key=rank.get)
     return (level, "DNS 上游探测", " ; ".join(parts))
 
+GS_LOC = ("gs-loc.apple.com", "gs-loc-cn.apple.com")   # WLOC 接管域名(与 bot MITM_PLUGIN_DOMAINS 同源)
+
+def check_mitm_structure():
+    """MITM 接管结构(mosdns force_hijack domain_set + force_hijack_seq + 优先级规则 + mitm_hijack.txt):
+    升级迁移是否补到位。仅 iOS。自定义/读不到 → info(不判); 标准结构缺 force_hijack 或规则顺序错 → warn。
+    与「MITM 插件」启用态分开: 结构应常驻(平时空文件=休眠), 缺了说明 v1.4.x 升级迁移没跑到。"""
+    if _platform() != "ios":
+        return None
+    conf = _mos()
+    if not conf:
+        return ("info", "MITM结构", "读不到 mosdns 配置")
+    if "tag: internal_sequence" not in conf or "tag: ecs_china" not in conf:
+        return ("info", "MITM结构", "自定义 mosdns 配置, 跳过 force_hijack 检查")
+    if "tag: force_hijack" not in conf:
+        return ("warn", "MITM结构", "缺 force_hijack 接管结构(v1.4.x 升级迁移未跑到); 开 WLOC 前 sudo pdg __migrate")
+    blk = _internal_seq_block(conf)
+    i_fh, i_cn = blk.find("qname $force_hijack"), blk.find("qname $geosite_cn")
+    if i_fh < 0 or (i_cn >= 0 and i_fh > i_cn):
+        return ("warn", "MITM结构", "force_hijack 优先级规则缺失或顺序错(应在 geosite_cn 之前强制接管)")
+    if "tag: force_hijack_seq" not in conf:
+        return ("warn", "MITM结构", "缺 force_hijack_seq(接管域名的 AAAA/HTTPS 抑制 + A 劫持序列)")
+    if not os.path.isfile("/etc/mosdns/rules/mitm_hijack.txt"):
+        return ("warn", "MITM结构", "缺 /etc/mosdns/rules/mitm_hijack.txt(接管域名集文件)")
+    return ("ok", "MITM结构", "force_hijack + force_hijack_seq + 优先级规则 + mitm_hijack.txt 就位")
+
 def check_mitm():
-    """MITM 插件(Feature B / iOS): 启用时 pdg-mitm 应 active + CA 就位。未启用 = info。安卓不适用。"""
+    """MITM 插件(Feature B / iOS): 启用时应 pdg-mitm active + CA + mitm_hijack 含接管域名 +
+    当前内核有 MITM 路由。未启用 = info。安卓不适用。(不只是 CA+active)"""
     if _platform() != "ios":
         return None                              # MITM/WLOC 仅 iOS, 安卓不显示此项
     try:
@@ -465,11 +491,30 @@ def check_mitm():
         return ("fail", "MITM 插件", "已启用(" + ",".join(enabled) + ")但 pdg-mitm 未运行")
     if not os.path.isfile("/etc/privdns-gateway/ca/ca.crt"):
         return ("fail", "MITM 插件", "缺 CA 证书 /etc/privdns-gateway/ca/ca.crt")
-    return ("ok", "MITM 插件", "pdg-mitm active + CA 就位(" + ",".join(enabled) + ")")
+    # 接管域名集应含 gs-loc 两域名(mosdns 强制劫持源)
+    try:
+        hij = open("/etc/mosdns/rules/mitm_hijack.txt").read()
+    except OSError:
+        hij = ""
+    if not all(d in hij for d in GS_LOC):
+        return ("fail", "MITM 插件", "mitm_hijack.txt 未含 gs-loc 接管域名(mosdns 未强制劫持, 重开一次 WLOC)")
+    # 当前内核的 MITM 路由: mihomo 需 MITM-OUT 出站 + gs-loc → MITM-OUT 规则; sing-box 无路由层
+    if _core() == "mihomo":
+        try:
+            mc = json.load(open(MIHOMO_CFG))
+            has_out = any(p.get("name") == "MITM-OUT" for p in mc.get("proxies", []))
+            has_rule = any(("MITM-OUT" in r) and ("gs-loc" in r) for r in mc.get("rules", []))
+        except Exception:  # noqa: BLE001
+            has_out = has_rule = False
+        if not (has_out and has_rule):
+            return ("fail", "MITM 插件", "mihomo 缺 MITM-OUT 出站或 gs-loc 路由(重开一次 WLOC 重渲染内核)")
+    else:
+        return ("fail", "MITM 插件", "WLOC 开启但内核为 sing-box(无 MITM 路由层), 请 pdg switch-core mihomo")
+    return ("ok", "MITM 插件", "pdg-mitm active + CA + mitm_hijack + mihomo MITM 路由 就位")
 
 ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
        check_internal_cidr, check_nft, check_gms, check_mosdns_ratelimit, check_mem,
-       check_cert, check_dns, check_singbox_config, check_mitm]
+       check_cert, check_dns, check_singbox_config, check_mitm_structure, check_mitm]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加

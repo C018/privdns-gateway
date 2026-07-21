@@ -88,6 +88,9 @@ jobs:
       - name: "GMS 推送端口迁移回归 (fw/sing-box 补 5228-5230, 自定义跳过, 失败回滚)"
         run: bash tests/test-gms-migration.sh
 
+      - name: "v1.4.x→WLOC 迁移回归 (补 force_hijack/seq/优先级规则/mitm_hijack, 幂等/自定义跳过/失败还原)"
+        run: bash tests/test-mitm-migration.sh
+
       - name: "parse_link 多协议回归 (各协议链接 + Surge ss 行字段映射)"
         run: python3 tests/test-parse-links.py
 
