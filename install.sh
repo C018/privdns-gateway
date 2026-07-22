@@ -77,7 +77,9 @@ source "$REPO_DIR/lib/units.sh"   # systemd unit 单一事实源(与 switch-core
 
 # ── 事务性安装: 失败自动回滚(只撤本次新装的, 不误伤既有可用部署)──
 INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0
-PRIOR_INSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; RESOLVED_DISABLED=0
+# 安装状态: 全部在注册 EXIT trap 前初始化 —— rollback 在 set -u 下读到未赋值的变量会
+# 二次崩溃, 把最初的安装错误盖掉, 还会漏掉它后面的 nftables/resolved/resolv.conf 还原。
+PRIOR_INSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; MIHOMO_INSTALLED=0; RESOLVED_DISABLED=0
 [[ -f /opt/pdg-bot/bot.py || -x /usr/local/bin/pdg ]] && PRIOR_INSTALL=1
 
 # 已有部署: install.sh 会重写配置, 半途失败难以无损还原 → 默认拒绝, 引导走 pdg update(带快照+回滚)。
@@ -94,9 +96,11 @@ if [[ "$PRIOR_INSTALL" == 1 ]]; then
 fi
 
 rollback(){
+  # set +e 只关 errexit, nounset 仍然生效 → 下面一律用 ${VAR:-0} 兜底, 不整体关 nounset。
   set +e
-  [[ "$ROLLBACK_DONE" == 1 ]] && return; ROLLBACK_DONE=1
-  if [[ "$FORCED_REINSTALL" == 1 ]]; then
+  local failed=()                       # 未能恢复的项; 单项失败不中断后续恢复
+  [[ "${ROLLBACK_DONE:-0}" == 1 ]] && return; ROLLBACK_DONE=1
+  if [[ "${FORCED_REINSTALL:-0}" == 1 ]]; then
     c_y "覆盖重装中途失败 —— 既有部署的配置可能已被改写。"
     c_y "  恢复:  sudo pdg rollback   (用安装前那份快照), 再  sudo pdg doctor  复查。"
     return
@@ -112,20 +116,34 @@ rollback(){
   nft delete table inet pdg 2>/dev/null
   rm -rf /etc/mosdns /etc/sing-box /etc/mihomo /opt/pdg-bot /etc/privdns-gateway
   rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
-  [[ "$MOSDNS_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mosdns
-  [[ "$SINGBOX_INSTALLED" == 1 ]] && rm -f /usr/local/bin/sing-box
-  [[ "$MIHOMO_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mihomo
-  # 还原系统级改动(仅全新安装才到这里)
+  # 只删本次安装新增的二进制: *_INSTALLED 仅在真正下载并安装后才置 1, 装前就有的一律不动。
+  [[ "${MOSDNS_INSTALLED:-0}"  == 1 ]] && { rm -f /usr/local/bin/mosdns   || failed+=("移除 mosdns"); }
+  [[ "${SINGBOX_INSTALLED:-0}" == 1 ]] && { rm -f /usr/local/bin/sing-box || failed+=("移除 sing-box"); }
+  [[ "${MIHOMO_INSTALLED:-0}"  == 1 ]] && { rm -f /usr/local/bin/mihomo   || failed+=("移除 mihomo"); }
+  # 还原系统级改动(仅全新安装才到这里)。逐项独立判定: 任一项失败都不许挡住后面的还原。
   if [[ -e /etc/nftables.conf.pdg-orig ]]; then
-    cp -a /etc/nftables.conf.pdg-orig /etc/nftables.conf 2>/dev/null
-    nft -f /etc/nftables.conf 2>/dev/null
-    rm -f /etc/nftables.conf.pdg-orig
+    if cp -a /etc/nftables.conf.pdg-orig /etc/nftables.conf 2>/dev/null; then
+      nft -f /etc/nftables.conf 2>/dev/null || failed+=("nftables 重载")
+      rm -f /etc/nftables.conf.pdg-orig
+    else
+      failed+=("nftables.conf 还原")
+    fi
   fi
-  [[ "$RESOLVED_DISABLED" == 1 ]] && systemctl enable --now systemd-resolved 2>/dev/null
-  if [[ -e /etc/resolv.conf.pdg-orig ]]; then rm -f /etc/resolv.conf; mv /etc/resolv.conf.pdg-orig /etc/resolv.conf 2>/dev/null; fi
-  c_y "已回滚到安装前状态。修正问题后可重跑 install.sh。"
+  if [[ "${RESOLVED_DISABLED:-0}" == 1 ]]; then
+    systemctl enable --now systemd-resolved 2>/dev/null || failed+=("systemd-resolved 恢复")
+  fi
+  if [[ -e /etc/resolv.conf.pdg-orig ]]; then
+    rm -f /etc/resolv.conf
+    mv /etc/resolv.conf.pdg-orig /etc/resolv.conf 2>/dev/null || failed+=("resolv.conf 还原")
+  fi
+  if [[ ${#failed[@]} -eq 0 ]]; then
+    c_y "已回滚到安装前状态。修正问题后可重跑 install.sh。"
+  else
+    c_y "回滚已尽力执行完, 但以下项未能恢复, 请手工检查: ${failed[*]}"
+  fi
 }
-on_exit(){ local rc="$1"; [[ "$INSTALL_OK" == 1 || "$rc" == 0 ]] && return 0; rollback; }
+# 不在此处 exit: 让 shell 保持触发退出的原始状态码, 回滚的失败不改写最初的安装错误。
+on_exit(){ local rc="$1"; [[ "${INSTALL_OK:-0}" == 1 || "$rc" == 0 ]] && return 0; rollback; }
 trap 'on_exit $?' EXIT
 
 # ── 1. 依赖 ──

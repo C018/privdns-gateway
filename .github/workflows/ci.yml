@@ -109,6 +109,9 @@ jobs:
       - name: "内核热切回归 (check/重启不稳定均还原旧核; 稳定后才删 .prev; 快照含内核二进制)"
         run: bash tests/test-core-swap.sh
 
+      - name: "install 回滚回归 (set -u 下不因未初始化变量二次崩溃; 系统级还原完整; 只删本次新装)"
+        run: bash tests/test-install-rollback.sh
+
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
 
