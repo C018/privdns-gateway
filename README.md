@@ -1,66 +1,60 @@
 # PrivDNS Gateway
 
-**单入口、多出口的「私密 DNS 分流网关」** —— 手机端**只设系统私密 DNS(DoT)**,不装任何 VPN / Clash / sing-box 客户端;
-服务端按域名把流量分到不同落地或直连。
+PrivDNS Gateway 是一个基于系统私密 DNS（DoT）的域名分流网关。手机端只需配置 DoT，网关根据域名决定直连，或把流量交给指定出口。手机不需要安装 VPN、Clash 或 sing-box 客户端。
 
-> 🚀 **第一次部署?** 跟着 **[新手图文教程 →](docs/QUICKSTART.md)** 一步步来(从买 VPS 到手机连上,全程带图)。
+> 第一次部署可参考图文教程：[docs/QUICKSTART.md](docs/QUICKSTART.md)。
+
+## 1. 项目简介
+
+手机把系统 DNS 指向网关的 DoT 域名后，域名解析统一由网关处理：
+
+- 国内域名返回真实 IP，手机直连。
+- 需要走代理的域名，网关把 A 记录改写成网关自己的 IP，流量因此回到网关；网关嗅探 SNI/Host，再按域名把连接交给对应出口，或从本机直出。
+
+手机上只有一条私密 DNS 设置，没有客户端，也没有 tun。出口、分流规则、故障组、DoT 域名等都在 Telegram Bot 或 `pdg` 命令里管理。
+
+## 2. 工作原理
 
 ```
- 手机 (Android 私密DNS / iOS 描述文件, 仅 DoT)
+手机（Android 私密 DNS / iOS 描述文件，仅 DoT）
    │  DoT :853
    ▼
- 网关 VPS ── mosdns ──► 国内域名: 返回真实 IP (直连)
-   │                   代理域名: A 记录劫持成「本机 IP」, AAAA/HTTPS 置空
-   │  :80/:443 sniff SNI
-   ▼
- sing-box ──► 按域名分流: AI/加密→落地A  其余国际→落地B  默认→本机直出
+网关 VPS
+   ├─ mosdns：国内域名返回真实 IP（直连）
+   │           代理域名把 A 记录改写为网关 IP，AAAA / HTTPS 置空
+   │
+   ▼  入站 :80 / :443 等，按 SNI / Host 嗅探
+流量内核（sing-box 或 mihomo，二选一，行为一致）
+   └─ 按域名分流：指定域名 → 落地 A / 落地 B；其余国际 → 本机直出
 ```
 
-核心思想:**把 DNS 当策略引擎**。
-代理域名的 A 记录被改写成网关自己的 IP,流量于是回到网关;
-sing-box 嗅探 SNI/Host 后再决定走哪个落地。
-手机全程只有一条「私密 DNS」设置,没有任何客户端、没有 tun。
+- DNS 层用 mosdns：按来源 IP 判断是否属于内网卡，再决定国内直连、代理域名劫持到网关、或抑制 AAAA / HTTPS。
+- 流量层用 sing-box 或 mihomo（装机时二选一，两者的出口、分流、故障组配置通用）：嗅探连接的域名后按规则分流。
+- mosdns 只对内网卡来源段生效，其他来源的 DNS 查询不受影响。
 
----
+## 3. 使用前提
 
-## ⚠️ 这个项目适合谁 / 前提
+本项目依赖一个特定拓扑，不是通用代理工具：
 
-它**不是通用翻墙工具**,依赖一个特定拓扑:
+- 一台墙外 VPS，同时作为网关和 DNS。
+- 一张运营商内网卡（定向内网 SIM）。手机的移动流量经运营商私网到达 VPS，来源 IP 是固定私有段（例如 `172.x`）。网关用这个私有源段区分「需要劫持的查询」和其他来源。没有这种内网卡时，DNS 劫持会影响到所有查询来源，不适用本项目。
+- 一个可以自行修改解析记录的域名，用于 DoT 并签发 Let's Encrypt 证书。
+- 一个 Telegram Bot，用于管理出口和分流。
+- 一个或多个落地节点用于出国际流量（可选；默认其余国际从 VPS 直出）。
 
-- 一台**墙外 VPS**(网关 + DNS)。
-- 一张运营商「**内网卡 / 定向内网 SIM**」—— 手机的移动流量经运营商私网到达你 VPS,且**源 IP 是固定私有段**(如 `172.x`)。
-  网关靠这个私有源段来区分「该劫持的查询」和别人。
-  - 没有这种内网卡 → DNS 劫持会影响到所有查询源,不适用本项目。
-- 一个你能改 DNS 记录的**域名**(给 DoT 用,签 Let's Encrypt 证书)。
-- 一个 **Telegram bot**(管理出口/分流)。
-- 一个或多个**落地节点**,用来出国际流量(可选,默认其余国际从 VPS 直出)。出口跑在 sing-box 上,**协议支持 sing-box 的全部出站**;bot 能直接粘贴的链接见下。
+## 4. 安装
 
----
-
-## 一键安装 (Debian 12+ / Ubuntu 22+)
+Debian 12+ / Ubuntu 22+，需要 root。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo bash
 ```
 
-入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
+入口脚本只负责自举，实际安装会切到最新的 `v*` 发布 tag，不安装 main 上未发布的中间提交。
 
-### 选择流量内核:sing-box(默认)还是 mihomo
+安装会部署 mosdns、所选流量内核、管理 Bot、防火墙和证书，自动识别公网 IP 和内网卡来源段，再交互填写 DoT 域名（Bot token 可以留空，装完后随时用 `sudo pdg-set-token` 设置并启用）。域名的 A 记录需要你自己指向本机，脚本会等你确认后再签发证书。
 
-装机时可选内核,**其余一切相同**(DNS 决策 / 单入口 / bot / 面板都不变;出口、分流规则、故障组配置两核通用)。上面那条命令装的是默认 sing-box;要 mihomo 就加 `PDG_CORE=mihomo`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo PDG_CORE=mihomo bash
-```
-
-| 内核 | 特点 | 更新 |
-|---|---|---|
-| **sing-box 1.12.x**(默认) | 稳定、久经实战 | 内核**钉死 1.12.x**——1.13 移除了本网关依赖的 `sniff_override_destination`,内核无法再升级(bot 代码仍可更新) |
-| **mihomo**(clash.meta) | 活跃维护;原生 clash 核,观测面板更顺、UDP/QUIC 更成熟 | 内核**可持续升级**(`sniffer.override-destination` 无版本天花板);`pdg update` / bot 更新按钮会随发布把内核升到最新钉死版 |
-
-> 不确定就用默认 sing-box;想要**内核能一直更新到最新**,就选 mihomo。两者手机端配置(DoT 域名)完全一样。
-
-或克隆后运行(便于先看代码):
+也可以克隆后运行（便于先查看代码）：
 
 ```bash
 git clone https://github.com/misaka-cpu/privdns-gateway.git
@@ -70,115 +64,122 @@ git checkout "$(git tag -l 'v*' --sort=-v:refname | head -1)"
 sudo ./install.sh
 ```
 
-脚本会装好 mosdns、sing-box(1.12)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
-域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。
-详见 [docs/INSTALL.md](docs/INSTALL.md)。
+更多安装细节见 [docs/INSTALL.md](docs/INSTALL.md)。卸载：`sudo ./uninstall.sh`（加 `--purge` 连配置一起删除）。
 
-卸载:`sudo ./uninstall.sh`(加 `--purge` 连配置一起删)。
+## 5. 手机平台选择
 
-## 装完之后
+一台网关对应一个手机号，平台是每台机器的固定属性，装机时确定（`PDG_PLATFORM=ios` 或 `android`；不指定则安装时询问）。平台决定客户端接入方式和是否提供 iOS 专属功能：
 
-1. 手机【私密 DNS / DoT】填你的域名(如 `dot.example.com`)。
-2. Telegram 给 bot 发 `/start`:
-   - **📤 出口管理 → 添加**:直接粘贴节点链接。
-     > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / anytls:// / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。
-     > sing-box 还支持 **shadowtls / ssh / hysteria(v1)/ wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json`,或开 issue 让 bot 加解析。
-   - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
-   - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
-3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
-   Wi-Fi/蜂窝都按 `:81` 探测自动判定启不启用(带分流代理的普通 Wi-Fi 自动直连、互不干扰);
-   bot 生成时还可指定「强制直连」的 Wi-Fi 名单(SSID,治 captive portal 误判)。
-4. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
+- Android：手机在系统「私密 DNS」里直接填 DoT 域名。不安装 iOS 描述文件、pdg-probe81、MITM/WLOC 相关组件。
+- iOS：通过 iOS 描述文件接入，另外安装 pdg-probe81（`:81` 探测）和 MITM/WLOC 组件。
 
-## 日常管理
+## 6. sing-box / mihomo 内核选择
+
+装机时可选流量内核，其余部分（DNS 决策、单一入口、Bot、观测面板）都相同；出口、分流规则、故障组配置两个内核通用。默认使用 sing-box，需要 mihomo 时加 `PDG_CORE=mihomo`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo PDG_CORE=mihomo bash
+```
+
+| 内核 | 说明 | 版本 |
+|---|---|---|
+| sing-box（默认） | `direct` 监听 + `sniff_override_destination`，不使用 tproxy | 固定使用 1.12.x；1.13 已移除项目依赖的 `sniff_override_destination` |
+| mihomo（clash.meta） | nft REDIRECT 入站 + redir 监听 + SNI 嗅探；提供 clash_api，可用观测面板 | 更新功能会安装当前 PrivDNS Gateway 发布版指定并校验过的 mihomo 版本 |
+
+装好后也可以随时切换内核：
+
+```bash
+sudo pdg switch-core mihomo     # 切到 mihomo
+sudo pdg switch-core singbox    # 切回 sing-box
+```
+
+切换时保留出口、分流、证书和 DoT 配置；切换期间连接可能中断几秒，失败时回滚。iOS 位置改写（WLOC）只支持 mihomo，切回 sing-box 前需要先关闭 WLOC。
+
+## 7. 手机接入
+
+- Android：系统「设置 → 网络 → 私密 DNS」选「指定的 DNS 服务提供商主机名」，填 DoT 域名（例如 `dot.example.com`）。
+- iOS：在 Bot「📱 客户端 → iOS 描述文件」生成并安装描述文件；不使用 Bot 时，`sudo pdg ios`（仅 iOS 平台可用）会在终端打出二维码，手机走内网卡扫码后在 Safari 里安装。Wi-Fi 与蜂窝是否启用私密 DNS 由 `:81` 探测自动判定（能连到网关才启用），生成时还可指定强制直连的 Wi-Fi 名单（SSID）。
+
+## 8. Telegram Bot 使用
+
+给 Bot 发 `/start` 进入菜单，常用功能：
+
+- 📤 出口管理：添加、删除、改名、排序出口，设置默认出口，新建/编辑故障切换组。
+  - 可直接粘贴的链接：`ss://`、`vmess://`、`vless://`（含 reality）、`trojan://`、`hysteria2://`、`tuic://`、`anytls://`、`socks5://`、`http://`，以及 Surge 的 `名字 = ss, …` 行。
+  - sing-box 还支持 shadowtls、ssh、hysteria（v1）、wireguard（endpoint）等出站，这些需要手写 `/etc/sing-box/config.json`，且不保证能转换到 mihomo（切到 mihomo 前请确认出口可用）。
+- 📑 分流管理：把域名、`.list` / `.txt` 等规则集指到出口；默认其余国际走 VPS 直出。
+- 🔀 故障切换组：按探测延迟选择出口，并在出口不可用时切换。
+- 📱 客户端：Android 显示私密 DNS 主机名；iOS 显示 iOS 描述文件入口。两个平台都提供「🌐 DoT 自定义域名」和「✈️ Telegram 出口」。
+- 🛠 运维：重启服务、更新规则库、备份/恢复、DNS 上游、TFO、观测面板、切换内核；iOS 平台另有「🍏 位置改写（WLOC）」。
+
+Telegram 出口（Bot 内置 SOCKS5，端口 8445）用于给手机上的 Telegram 单独指定出口，在客户端菜单里配置。
+
+## 9. 日常管理命令
 
 ```bash
 sudo pdg            # 进管理菜单
-sudo pdg doctor     # 自检(只读); --json 可脚本化; --deep 加端到端检查(DoT握手/:81/DNS/clash)
 sudo pdg status     # 状态
-sudo pdg update     # 更新(更新前自动快照, 失败自动回滚; --dry-run 看待更新)
+sudo pdg doctor     # 自检（只读）；--json 可脚本化；--deep 加端到端检查
+sudo pdg update     # 更新（更新前自动快照，失败自动回滚；--dry-run 查看待更新）
 sudo pdg snapshot   # 手动留一份配置快照
 sudo pdg rollback   # 回滚到最近快照
-sudo pdg token      # 设置 / 更换 bot token
+sudo pdg token      # 设置 / 更换 Bot token
 sudo pdg restart    # 重启服务
-sudo pdg log [n]    # 看日志
-sudo pdg traffic    # 网卡流量(vnstat)
-sudo pdg ios        # 不用 bot, 直接出 iOS 描述文件二维码
-sudo pdg report     # 脱敏诊断报告(隐藏 token/密码/uuid); --redact-ip 连IP/域名也隐藏; --full 不脱敏
-sudo pdg detect-cidr # 抓包重新识别内网卡来源段, 与现配不符可一键写回并重启
-sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
+sudo pdg log [n]    # 查看日志
+sudo pdg traffic    # 网卡流量（vnstat）
+sudo pdg ios        # 仅 iOS：在终端打出 iOS 描述文件二维码
+sudo pdg report     # 脱敏诊断报告；--redact-ip 连 IP/域名一起隐藏；--full 不脱敏
+sudo pdg detect-cidr           # 重新识别内网卡来源段，与现配不符可写回并重启
+sudo pdg switch-core <mihomo|singbox>   # 切换流量内核
+sudo pdg hijack-mode <all|gfw>          # 切换劫持模式
+sudo pdg uninstall [--purge]            # 卸载（--purge 连配置删）
 ```
 
-> 健康自检每 10 分钟自动跑,服务挂 / DNS 不应答 / 证书快到期会 Telegram 私信你。
+`pdg update` 只跟随项目的 `v*` 发布 tag，不安装 main 上未发布的中间提交；更新会同时安装该发布版指定并校验过的内核版本。健康自检每 10 分钟自动运行，服务异常、DNS 不应答、证书临近到期会通过 Telegram 通知。生命周期（安装、更新、卸载、token、状态）用 `pdg` 命令管理；出口、分流、DNS 上游等运行时配置在 Telegram Bot 里。
 
-> 分工:`pdg` 管**生命周期**(装/更新/卸载/token/状态);**出口 / 分流 / DNS 上游**等运行时配置都在 Telegram bot 里。
+## 10. iOS 位置改写（WLOC，可选）
 
-## 📍 iOS 位置改写 (WLOC,可选)
+WLOC 只修改 Apple 网络定位响应中的坐标，不修改 GPS 数据。它把 `gs-loc.apple.com` 的定位查询转发给 Apple，取回真实响应后只替换其中的坐标。适用于依赖网络定位的场景；连续 GPS 定位（导航、打车等）不适用，户外 GPS 信号较强时也会覆盖它。WLOC 只支持 mihomo 内核，且仅 iOS 平台提供。
 
-把 iPhone 的**网络定位**改写到设定城市 —— **手机不用装任何 App**,靠系统 DoT + 一次性信任网关 CA,在 Telegram bot 里管多地点、一键切换。原理:网关截 `gs-loc.apple.com` 定位查询、转发给真 Apple 拿回真响应、只把坐标改成设定点(格式 100% 保真,iOS 才接受)。
+首次使用顺序：
 
-> ✅ 适用:今日水印相机 / 小红书同城 / 室内打卡这类**走网络定位**的场景。
-> ❌ 不适用:连续 GPS 的导航 / 打车 / 定位游戏(那类要电脑侧 GPS 级虚拟定位工具);户外 GPS 信号强时也会盖过它。
+1. 在 Bot「🛠 运维 → 🍏 位置改写」里「➕ 添加地点」（发送「`名称 纬度,经度`」，例如 `上海 31.2304,121.4737`），然后「✅ 开启」。
+2. 返回「📱 客户端 → iOS 描述文件」，重新生成并安装 iOS 描述文件。
+3. 在「设置 → 通用 → 关于本机 → 证书信任设置」中，信任 PrivDNS Gateway MITM CA。
 
-> ⚙️ **内核要求:WLOC 仅 mihomo 内核支持**(MITM 路由层)。sing-box 上 bot 会拒绝开启,先 `sudo pdg switch-core mihomo`。
+日常使用（手机全程走内网卡）：
 
-### 一次性设置(顺序要对)
-1. 装机时平台选 **iOS**(`PDG_PLATFORM=ios`)→ 自动装 `pdg-mitm` 服务;确认内核为 mihomo。
-2. **先在 bot 里加城市**:「🛠 运维 → 🍏 位置改写」→「➕ 添加地点」发「`名称 纬度,经度`」(如 `上海 31.2304,121.4737`)。
-3. **生成并安装含 CA 的描述文件**:bot「📱 客户端 → iOS 描述文件 → 🔐 WLOC-CA 版」。普通版**不含 CA**,WLOC 必须用这个含 CA 的版本。装到 iPhone(设置 → 通用 → VPN与设备管理 → 装描述文件)。
-4. **iPhone 手动信任 CA**(缺这步定位不会变):设置 → 通用 → 关于 → **证书信任设置** → 对「PrivDNS Gateway MITM CA」**开启完全信任**。
-5. 回 WLOC 菜单「📍 地点/切换」点城市 →「✅ 开启」。
+- 在控制中心把 Wi-Fi 图标点灰关闭（不是在「设置」里关，设置里关会同时关闭 Wi-Fi 定位扫描）。
+- 在「设置 → 隐私与安全性 → 定位服务」里关闭再开启定位服务。
+- 多个地点可以随时增删，开启状态下可切换。
 
-### 日常使用
-多地点随时增删、开启中热切换:「🛠 运维 → 🍏 位置改写」→「📍 地点/切换」。
+实际刷新时间受 iOS 定位缓存和系统定位策略影响。频繁进行远距离切换后，系统可能继续使用 GPS 结果，恢复时间不固定；此时可以重新开关定位服务或重启手机。原理与配置见 [docs/design-mitm-plugins.md](docs/design-mitm-plugins.md)。
 
-**然后手机端**(全程用内网卡):
-1. **控制中心关 WiFi** —— 下拉控制中心把 WiFi 图标点灰(⚠️ **不是「设置」里关!** 设置里关会连 Wi-Fi 定位扫描一起关掉,就没东西可改了)。
-2. **关闭定位服务** —— 设置 → 隐私与安全性 → 定位服务 → 关。
-3. **还原位置与隐私 + 重启**(⚠️ **仅首次 / 后续无法改定位时**)—— 设置 → 通用 → 传输或还原 iPhone → 还原 → 还原位置与隐私 → 重启手机。
-4. **开启定位服务** —— 设置 → 隐私与安全性 → 定位服务 → 开。
+## 11. 项目组成
 
-开好后打开 Apple 地图 / 今日水印相机看即可。
-
-### 大概等待时间
-| 场景 | 操作 | 等待 |
+| 层 | 组件 | 说明 |
 |---|---|---|
-| 首次开启 / 从真实位置切到假位置 | 定位服务关开一次 | ~1 分钟 |
-| **国内城市之间**切换(如 上海→北京) | 定位服务关开一次 | **几十秒 ~ 1 分钟** |
-| **跨国**切换(如 上海→东京) | 飞行模式 ON ~15 秒 → OFF,耐心等 | **数分钟**(iOS 反作弊+缓存,会先"转圈"再稳) |
+| DNS | mosdns v5 | 国内直连；代理域名 A 记录劫持到本机、AAAA / HTTPS 置空；按来源 IP 分支；ECS 处理；缓存；DoT（853）；可选 GFWList 劫持模式 |
+| 流量（二选一） | sing-box 或 mihomo | sing-box 用 `direct` 监听 + `sniff_override_destination`；mihomo 用 nft REDIRECT 入站 + redir 监听 + SNI 嗅探。多出口故障切换；mihomo 提供 clash_api。`pdg switch-core` 切换时保留出口、分流、证书和 DoT，失败回滚 |
+| 管理 | Telegram Bot（Python 标准库） | 出口、分流、规则集、测速、流量、备份恢复、iOS 描述文件、自定义域名、WLOC；改配置前先校验，失败回滚 |
+| 位置改写 | pdg-mitm（可选，iOS） | 自签 CA + 终止 TLS + 转发并替换 `gs-loc` 响应坐标 |
+| 证书 | certbot standalone | Let's Encrypt，自动续期 |
+| 防火墙 | nftables | 对全网只放行 SSH；DNS、数据、探测端口只放行内网卡来源段；mihomo 用 REDIRECT 入站，同样限内网卡来源 |
 
-### 注意
-- **iOS 26 缓存极重**:切城市后不做"定位服务关开 / 重启",会一直显示旧位置。
-- **别在中↔日之间反复横跳**:会把 iOS 弄进"不信 Wi-Fi 定位、退回真实 GPS"的状态,连累之后的国内切换也变慢;真进了这状态,飞行模式 ON→OFF 几次 + 耐心等可恢复。
-- **别收紧精度**:过度精确的假定位会触发 iOS 反作弊、直接退回真实定位(项目已默认不动精度)。
-- 原理 / 踩坑详见 [docs/design-mitm-plugins.md](docs/design-mitm-plugins.md)。
+使用 sing-box 内核时需要 1.12.x：1.13 已移除 `sniff_override_destination`，安装脚本已固定版本。需要更新内核时可选用 mihomo（装机加 `PDG_CORE=mihomo`，或用 `pdg switch-core mihomo`）。
 
-## 组成
+## 12. 文档
 
-| 层 | 用什么 | 说明 |
-|---|---|---|
-| DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存;DoT(853);可选 GFWList 劫持模式 |
-| 流量(双核可切) | **sing-box 1.12** 或 **mihomo** | sing-box:`direct` 监听 + `sniff_override_destination`(不用 tproxy);mihomo:nft REDIRECT 入站 + redir 监听 + SNI 嗅探,内核可持续更新。多出口 urltest 故障切换;clash_api 测速/流量。**`pdg switch-core` 无损互切**(出口/分流/证书全不动) |
-| 管理 | **Telegram bot**(纯标准库) | 出口 / 分流 / 规则集 / 测速 / 流量 / 备份恢复 / iOS 描述文件 / 自定义域名 / **WLOC 位置改写**,改配置前 `check` + 回滚 |
-| 位置改写 | **pdg-mitm**(可选,iOS) | 自签 CA + TLS 终止 + forward+patch 改写 `gs-loc` 网络定位(见上文「iOS 位置改写 WLOC」) |
-| 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被内核占的坑) |
-| 防火墙 | **nftables** | 对全网只留 SSH;DNS / 数据 / 探测口只放行内网卡来源段;mihomo 用 REDIRECT 入站(同样限内网卡) |
-
-> ⚠️ 用 **sing-box** 内核时**必须 1.12.x** —— 1.13 移除了 `sniff_override_destination` 会失效(install.sh 已固定版本)。想让内核持续更新到最新,装机选 `PDG_CORE=mihomo` 或事后 `pdg switch-core mihomo`(mihomo 无此版本天花板,见上文「选择流量内核」)。
-
-## 文档
-
-- [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
-- [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
-- [docs/production-notes.md](docs/production-notes.md) — 实战记录与踩坑(sing-box 版本坑、QUIC 自环、ECS、安全加固等)
-- [docs/design-mitm-plugins.md](docs/design-mitm-plugins.md) — iOS 位置改写 (WLOC) 设计、forward+patch 原理与配方
-- [docs/RELEASE-CHECKLIST.md](docs/RELEASE-CHECKLIST.md) — 发版前检查清单(装机 / 升级 / 切核 / WLOC 集成自测)
+- [docs/QUICKSTART.md](docs/QUICKSTART.md) — 新手图文教程
+- [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本说明
+- [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册（症状 → 排查 → 修复）
+- [docs/production-notes.md](docs/production-notes.md) — 实战记录与已知问题
+- [docs/design-mitm-plugins.md](docs/design-mitm-plugins.md) — iOS 位置改写（WLOC）设计与原理
+- [docs/RELEASE-CHECKLIST.md](docs/RELEASE-CHECKLIST.md) — 发版前检查清单
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志
 
-## 免责声明
+## 13. 免责声明与 License
 
-本项目仅供**学习与合法网络管理**用途。请遵守你所在地的法律法规;使用者自行承担责任。作者不对任何使用后果负责。
+本项目仅供学习与合法网络管理用途。请遵守你所在地的法律法规，使用者自行承担责任，作者不对使用后果负责。
 
-## License
-
-[MIT](LICENSE)
+License：[MIT](LICENSE)

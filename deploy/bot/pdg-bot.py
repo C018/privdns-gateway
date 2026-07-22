@@ -220,12 +220,12 @@ def _nav(key):
              {"text": "🗑 删规则集", "callback_data": "del_rs"}],
             [{"text": "✏️ 改规则集名", "callback_data": "edit_rs"}, {"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
         # 客户端接入按平台分岔: Android 只给私密DNS 主机名; iOS 只给描述文件按钮。公共项(DoT 域名 / TG 出口)两平台都留。
-        "client": ((f"📱 <b>客户端接入(iOS)</b>\niOS 点下方生成描述文件(DoT 域名 <code>{_dot_host()}</code>):", [
+        "client": ((f"📱 <b>客户端接入</b>\nDoT 域名：<code>{_dot_host()}</code>\n请生成并安装 iOS 描述文件。", [
             [{"text": "📱 iOS 描述文件", "callback_data": "ios"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]])
             if _platform() == "ios" else
-            (f"📱 <b>客户端接入(Android)</b>\nAndroid 私密 DNS 填: <code>{_dot_host()}</code>", [
+            (f"📱 <b>客户端接入</b>\nAndroid 私密 DNS：<code>{_dot_host()}</code>", [
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]])),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
@@ -236,7 +236,7 @@ def _nav(key):
     }
     if _platform() == "ios":                          # iOS 专属: 位置改写(WLOC)
         subs["ops"][1].append([{"text": "🍏 位置改写(WLOC)", "callback_data": "wloc"}])
-    _lbl = "🔀 换到 mihomo 内核(可更新)" if _core_backend() == "singbox" else "🔀 换回 sing-box 内核"
+    _lbl = "🔀 换到 mihomo 内核" if _core_backend() == "singbox" else "🔀 换回 sing-box 内核"
     subs["ops"][1].append([{"text": _lbl, "callback_data": "switchcore"}])
     title, rows = subs[key]
     return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
@@ -640,13 +640,10 @@ def wloc_switch(name):
 def wloc_enable(on):
     """开/关 WLOC(开启需已有激活地点)。"""
     if _platform() != "ios":
-        return False, "位置改写(WLOC)仅 iOS 平台可用(安卓需 root, 且走 Google 定位, 不支持)。"
-    # 硬门控: WLOC 的 MITM 路由(接管域名 → 本地 socks5 7894)只有 mihomo 内核会渲染。
-    # sing-box 模型即运行配置(无独立渲染层), 加 MITM-OUT 会污染用户配置 → 暂不支持,
-    # 明确拒绝(不假成功): 关是随时允许的, 只拦"在 sing-box 上开启"。
+        return False, "位置改写(WLOC)仅 iOS 平台可用。"
+    # WLOC 的 MITM 路由只有 mihomo 内核渲染; sing-box 不能直接开(菜单入口也会提示切 mihomo)。
     if on and _core_backend() != "mihomo":
-        return False, ("位置改写(WLOC/MITM)目前仅 mihomo 内核支持 —— sing-box 无 MITM 路由层。\n"
-                       "请先切到 mihomo 内核(菜单「🔀 切换内核」或 `sudo pdg switch-core mihomo`)再开启。")
+        return False, "WLOC 需要 mihomo 内核。请先返回运维菜单，切换到 mihomo。"
     w = _wloc_state()
     if on and not _wloc_active(w):
         return False, "请先「➕ 添加地点」设一个坐标再开启。"
@@ -656,16 +653,16 @@ def wloc_enable(on):
         return False, msg
     if on:
         loc = _wloc_active(w)
-        return True, (f"✅ 位置改写已开启 → <b>{w['active']}</b>({loc['lat']}, {loc['lon']})\n"
-                      "⚠️ iPhone 须先装「🔐 WLOC-CA 描述文件」并在「证书信任设置」信任本网关 CA;"
-                      "手机「内网卡 + 控制中心关 WiFi」时才生效。"
-                      "iOS 26 缓存重, 切换后去「定位服务」关开或重启才刷新。")
+        return True, (f"✅ 位置改写已开启：<b>{w['active']}</b>（{loc['lat']}, {loc['lon']}）\n\n"
+                      "首次开启后，请到「📱 客户端」重新生成并安装 iOS 描述文件，"
+                      "然后在「证书信任设置」中信任 PrivDNS Gateway MITM CA。\n\n"
+                      "若位置没有刷新，请重新开关定位服务或重启手机。")
     return True, "✅ 位置改写已关闭。"
 
 def set_wloc(on, lat=None, lon=None):
     """兼容旧接口: 给了 lat/lon 就存成「默认」地点并激活, 再开/关。"""
     if _platform() != "ios":
-        return False, "位置改写(WLOC)仅 iOS 平台可用(安卓需 root, 且走 Google 定位, 不支持)。"
+        return False, "位置改写(WLOC)仅 iOS 平台可用。"
     if lat is not None and lon is not None:
         wloc_add("默认", lat, lon)
         wloc_switch("默认")
@@ -1010,7 +1007,7 @@ def add_group(name, members):
                                 "url": DELAY_URL, "interval": "3m", "tolerance": 50})
     ok, msg = apply_sb(mod)
     return ok, (f"✅ 故障切换组 <b>{name}</b> = {' › '.join(members)}\n"
-                "自动选最快, 成员故障自动切换。可在「🎯 设默认出口」或分流规则里选它。" if ok else msg)
+                "按探测延迟选择出口，并在出口不可用时切换。可在「🎯 设默认出口」或分流规则里选它。" if ok else msg)
 
 # ── 直连表 (mosdns) ──
 def _read_direct():
@@ -1978,7 +1975,8 @@ def update_check():
     log = _git("log", "--oneline", "HEAD.." + tgt).stdout.strip()
     n = len(log.splitlines())
     return True, (f"🔄 有新发布 <b>{tgt}</b>(当前 <code>{cur}</code>,含 {n} 个提交):\n"
-                  f"<pre>{_esc(log)}</pre>\n确认后后台执行 pdg update → 更新到 {tgt}(约 30-60 秒, bot 自动重启回来)。")
+                  f"<pre>{_esc(log)}</pre>\n确认后后台执行 pdg update → 更新到 {tgt}(约 30-60 秒, bot 自动重启回来)。\n"
+                  "更新会同时安装该 PrivDNS Gateway 发布版指定并校验过的内核版本。")
 
 def start_update():
     """在独立的 systemd 瞬时单元里跑 pdg update, 不受 pdg-bot 自身重启影响。"""
@@ -2324,11 +2322,9 @@ def _mitm_ca_der():
     except Exception:  # noqa: BLE001
         return b""
 
-def _ios_profile(ssids=(), with_ca=False):
-    """普通 DoT 描述文件。ssids 非空时在 OnDemandRules 最前插一条「命中这些 SSID 强制直连」。
-    with_ca=True(仅「WLOC-CA 描述文件」入口)才附根 CA payload, 让设备先信任本网关 CA、
-    再开 WLOC —— 普通描述文件**默认不带 CA**(不再随 WLOC 开启态偷偷带上)。
-    CA 生成/读取失败时**抛错**, 绝不静默产出无 CA 的『成功』描述文件。
+def _ios_profile(ssids=()):
+    """iOS DoT 描述文件。ssids 非空时在 OnDemandRules 最前插一条「命中这些 SSID 强制直连」;
+    WLOC(MITM 插件)启用时附上根 CA payload, 让设备信任本网关 CA(先开 WLOC 再重新生成即含 CA)。
     用 plistlib 插入, SSID 含 &<> 等也不会破 XML。"""
     if _platform() != "ios":         # 最底层门控: 即便某路径绕过按钮/回调, 也生成不了 iOS 描述文件
         raise RuntimeError("iOS 描述文件仅 iOS 平台可用(本机为 Android)。")
@@ -2339,11 +2335,7 @@ def _ios_profile(ssids=(), with_ca=False):
             .replace("__JP_IP__", _server_ip())
             .replace("__UUID1__", str(uuid.uuid4()).upper())
             .replace("__UUID2__", str(uuid.uuid4()).upper())).encode()
-    der = b""
-    if with_ca:
-        der = _mitm_ca_der()
-        if not der:
-            raise RuntimeError("MITM 根 CA 生成/读取失败, 未产出证书 —— 请检查 openssl 后重试(未生成描述文件)。")
+    der = _mitm_ca_der() if _mitm_enabled_domains() else b""
     if not ssids and not der:
         return raw
     p = plistlib.loads(raw)
@@ -2600,7 +2592,7 @@ def kb_pick_named(prefix, items, back=BACK):
 # ── 回调 (原地编辑) ──
 def handle_cb(chat, mid, data):
     # iOS 专属功能的统一后端门控(不只隐藏按钮): 旧 TG 消息里的 iOS 描述文件 / WLOC 按钮被点也拒绝。
-    if (data in ("ios", "iosgen", "iosgenca") or data == "wloc" or data.startswith("wloc:")) \
+    if (data in ("ios", "iosgen") or data == "wloc" or data.startswith("wloc:")) \
        and not _ios_only(chat, mid):
         return
     if data in ("menu", "status") or data.startswith("nav:"):
@@ -2644,7 +2636,7 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless://(含 reality) hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n/cancel 取消。", EXIT_BACK); return
     if data == "add_grp":
         state[chat] = "add_group"
-        edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」建故障切换组(自动选最快/坏了自动切)。\n"
+        edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」建故障切换组(按探测延迟选择出口，不可用时切换)。\n"
              f"可选成员: {', '.join(concrete_tags(load()))}\n例: <code>main hk tw us</code>\n"
              "建好后可在「🎯 设默认出口」或规则里选它。/cancel 取消。", EXIT_BACK); return
     if data == "add_rule":
@@ -2752,14 +2744,11 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "「其余国际」默认走哪个出口/组：", kb_pick("fin", exit_tags(load()), EXIT_BACK)); return
     if data == "ios":
         state[chat] = "ios_ssid"
-        wl = ("\n🔐 <b>要用 WLOC(位置改写)?</b> 别装普通版 —— 点「WLOC-CA 版」拿<b>含根 CA</b> 的描述文件, "
-              "装上并<b>信任 CA</b> 后再去开启 WLOC。" if _platform() == "ios" else "")
         edit(chat, mid, "📱 <b>生成 iOS 描述文件</b>\n"
              "Wi-Fi/蜂窝下是否启用私密 DNS 都由 <code>:81</code> 探测自动判定(网络能走到网关才启用)。\n"
              "若有想<b>强制直连</b>的 Wi-Fi(如公司网、探测误判的酒店网), 发它的名字(SSID, 多个则每行一个)再生成;"
-             "不需要就点「直接生成」。普通版<b>不含 CA</b>。/cancel 取消。" + wl,
-             {"inline_keyboard": [[{"text": "⏭ 直接生成(无CA)", "callback_data": "iosgen"}],
-                                  [{"text": "🔐 WLOC-CA 版(先装这个再开WLOC)", "callback_data": "iosgenca"}],
+             "不需要就点「直接生成」。/cancel 取消。",
+             {"inline_keyboard": [[{"text": "⏭ 直接生成", "callback_data": "iosgen"}],
                                   [{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
                                   [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data == "iosgen":
@@ -2767,24 +2756,10 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "正在生成 iOS 描述文件…", BACK)
         try:
             send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(),
-                          f"📱 iOS/iPadOS 私密DNS 描述文件(不含 CA)\nDoT: {_dot_host()}\n"
+                          f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
                           "装法: 存到「文件」App → 点开 → 设置→通用→「已下载描述文件」→ 安装。\n"
                           "Wi-Fi/蜂窝均靠服务器 :81 探测激活, 安装时已自动配好。")
             edit(chat, mid, "✅ 描述文件已发送(见上一条)。", MENU)
-        except Exception as e:  # noqa: BLE001
-            edit(chat, mid, f"生成失败: {e}", MENU)
-        return
-    if data == "iosgenca":
-        state.pop(chat, None)
-        edit(chat, mid, "正在生成 WLOC-CA 描述文件(含根 CA)…", BACK)
-        try:
-            # with_ca=True 会顺带 ensure_ca() 生成根 CA 并打进描述文件; 生成失败会抛错(不产出无 CA 的假成功件)
-            send_document(chat, "PrivDNS-Gateway-WLOC-CA.mobileconfig", _ios_profile(with_ca=True),
-                          f"🔐 iOS WLOC-CA 描述文件(DoT + 根 CA)\nDoT: {_dot_host()}\n"
-                          "正确顺序: ① 先在 WLOC 菜单加好定位地点 → ② 装这个描述文件(设置→通用→VPN与设备管理 安装)"
-                          " → ③ 设置→通用→关于本机→证书信任设置, <b>为本网关 CA 打开完全信任</b>"
-                          " → ④ 回 WLOC 菜单点「开启」。")
-            edit(chat, mid, "✅ WLOC-CA 描述文件已发送(见上一条)。装好并<b>信任 CA</b> 后再开启 WLOC。", MENU)
         except Exception as e:  # noqa: BLE001
             edit(chat, mid, f"生成失败: {e}", MENU)
         return
@@ -2835,16 +2810,20 @@ def handle_cb(chat, mid, data):
     if data in ("wloc", "wloc:menu"):
         if _platform() != "ios":
             edit(chat, mid, "位置改写(WLOC)仅 iOS 平台可用。", OPS_BACK); return
+        if _core_backend() != "mihomo":
+            edit(chat, mid, "WLOC 需要 mihomo 内核。\n请先返回运维菜单，切换到 mihomo。", OPS_BACK); return
         w = _wloc_state(); on = bool(w.get("enabled")); loc = _wloc_active(w)
         cur = f"<b>{w['active']}</b>({loc['lat']}, {loc['lon']})" if loc else "未设"
-        gate = "" if _core_backend() == "mihomo" else "\n⚠️ 当前内核为 sing-box, WLOC 仅 mihomo 支持 —— 先「🔀 切换内核」到 mihomo 再开启。"
-        edit(chat, mid, f"🍏 <b>位置改写 (WLOC)</b>\n状态: <b>{'🟢 开启' if on else '关闭'}</b>　当前: {cur}　地点: {len(w['locations'])} 个{gate}\n"
-             "把 iPhone 网络定位改写到设定城市(国内 / 跨国均可)。<b>开启前</b>先在「📱 客户端 → iOS 描述文件 → 🔐 WLOC-CA 版」拿到含 CA 的描述文件, 装上并到「证书信任设置」<b>信任本网关 CA</b>。\n"
-             "<b>手机端操作</b>(全程用内网卡):\n"
-             "① <b>控制中心</b>关 WiFi(把图标点灰,<b>不是「设置」里关</b>——设置里关会连 Wi-Fi 定位扫描一起关掉)\n"
-             "② 关定位服务:设置 → 隐私与安全性 → 定位服务 → 关\n"
-             "③ <b>仅首次 / 后续无法改定位时</b>:设置 → 通用 → 传输或还原 iPhone → 还原 → 还原位置与隐私 → 重启手机\n"
-             "④ 开定位服务:设置 → 隐私与安全性 → 定位服务 → 开",
+        edit(chat, mid, f"🍏 <b>位置改写 (WLOC)</b>\n状态: <b>{'🟢 开启' if on else '关闭'}</b>　当前: {cur}　地点: {len(w['locations'])} 个\n\n"
+             "WLOC 只修改 Apple 网络定位响应中的坐标，不修改 GPS 数据。使用前需要安装并信任网关 CA。\n\n"
+             "<b>首次使用顺序:</b>\n"
+             "① 添加地点并开启 WLOC\n"
+             "② 返回「📱 客户端」，重新生成并安装 iOS 描述文件\n"
+             "③ 到「设置 → 通用 → 关于本机 → 证书信任设置」，信任 PrivDNS Gateway MITM CA\n\n"
+             "<b>手机端(全程用内网卡):</b>\n"
+             "· 控制中心关 WiFi(把图标点灰，不是在设置里关)\n"
+             "· 关闭再开启定位服务:设置 → 隐私与安全性 → 定位服务\n"
+             "· 若位置没有刷新，请重新开关定位服务或重启手机",
              {"inline_keyboard": [
                  [{"text": "🟢 已开启" if on else "✅ 开启", "callback_data": "wloc:on"},
                   {"text": "关闭", "callback_data": "wloc:off"}],
@@ -2891,10 +2870,20 @@ def handle_cb(chat, mid, data):
         ok, msg = wloc_enable(data == "wloc:on"); edit(chat, mid, msg if ok else ("❌ " + msg), WLOC_BACK); return
     if data == "switchcore":
         cur = _core_backend(); tgt = "mihomo" if cur == "singbox" else "singbox"
-        extra = ("mihomo 活跃维护、内核可持续更新(摆脱 sing-box 1.12 版本天花板)。\n" if tgt == "mihomo"
-                 else "切回 sing-box(1.12 钉死)。\n")
-        edit(chat, mid, f"🔀 <b>切换内核 {cur} → {tgt}</b>\n出口/分流/证书/DoT/规则全<b>不动</b>,只换内核 + 防火墙入站模型。\n"
-             + extra + "⚠️ 切换时代理短暂中断几秒(手机重连即恢复)。失败会自动回滚。",
+        # 切回 sing-box 前: WLOC 开启则阻止, 避免留下"WLOC 显示开启但 pdg-mitm 已停"的状态。
+        if tgt == "singbox" and bool((_mitm_config().get("wloc") or {}).get("enabled")):
+            edit(chat, mid, "WLOC 当前处于开启状态。请先关闭 WLOC，再切换到 sing-box。", OPS_BACK); return
+        if tgt == "mihomo":
+            body = ("🔀 <b>切换内核：sing-box → mihomo</b>\n\n"
+                    "出口、分流、证书、DoT 和规则配置会保留。\n"
+                    "mihomo 版本随 PrivDNS Gateway 发布更新。\n\n"
+                    "切换期间连接可能中断几秒；失败时自动回滚。")
+        else:
+            body = ("🔀 <b>切换内核：mihomo → sing-box</b>\n\n"
+                    "出口、分流、证书、DoT 和规则配置会保留。\n"
+                    "sing-box 固定使用 1.12.x。\n\n"
+                    "WLOC 仅支持 mihomo，切换期间连接可能中断几秒；失败时自动回滚。")
+        edit(chat, mid, body,
              {"inline_keyboard": [[{"text": f"✅ 确认换到 {tgt}", "callback_data": "switchcore:" + tgt}],
                                   [{"text": "取消", "callback_data": "nav:ops"}]]}); return
     if data in ("switchcore:mihomo", "switchcore:singbox"):

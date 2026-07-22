@@ -111,7 +111,7 @@ def check_singbox_version():
     if _core() == "mihomo":
         _, out, _ = _run(["mihomo", "-v"])
         m = re.search(r"v?(\d+\.\d+\.\d+)", out or "")
-        return ("ok", "mihomo 版本", "v" + m.group(1) + " ✓(无版本天花板, 可更新)") if m \
+        return ("ok", "mihomo 版本", "v" + m.group(1) + " ✓(版本随项目发布更新)") if m \
             else ("warn", "mihomo 版本", "读不到版本")
     _, out, _ = _run(["sing-box", "version"])
     m = re.search(r"version\s+(\d+)\.(\d+)", out)

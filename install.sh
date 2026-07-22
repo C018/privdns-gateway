@@ -470,12 +470,12 @@ if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
 fi
 cat <<EOF
 
-下一步:
-  1) 手机【私密 DNS / DoT】填:  $DOT_DOMAIN
+下一步($PLATFORM 平台):
+  1) $( [[ "$PLATFORM" == ios ]] && echo "iOS:见第 3 步生成并安装 iOS 描述文件(DoT 域名:$DOT_DOMAIN)" || echo "手机「私密 DNS」填:  $DOT_DOMAIN" )
   $( [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]] && echo "2) 启用管理 bot:  sudo pdg-set-token  (之后再发 /start)" || echo "2) Telegram 给你的 bot 发 /start, 然后:" )
        • 「📤 出口管理 → 添加」粘贴 ss:// / vmess:// / trojan:// / vless:// 落地节点
        • 「📑 分流管理」按需把域名/规则集指到出口 (默认其余国际走 jp 直出)
-  3) iOS 用户: bot「📱 客户端 → iOS 描述文件」, 装上即可(蜂窝探测 :81 已就绪)
+  $( [[ "$PLATFORM" == ios ]] && echo "3) iOS:bot「📱 客户端 → iOS 描述文件」生成并安装(Wi-Fi/蜂窝由 :81 探测激活)" || echo "3) Android:私密 DNS 填上面的 DoT 域名即可" )
   4) 换域名随时用 bot「🌐 DoT 自定义域名」
 
 🛠 日常管理:  sudo pdg   (状态 / 更新 / 换 token / 重启 / 日志 / 卸载)

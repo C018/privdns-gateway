@@ -212,7 +212,7 @@ cmd_status(){
   done
   [[ "$(_pdg_platform)" == ios ]] && printf "  %-12s %s\n" "pdg-mitm" "$(systemctl is-active pdg-mitm 2>/dev/null)"
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
-  echo "  内核后端     $core$([[ "$core" == mihomo ]] && echo "(可更新, 无版本天花板)" || echo "(1.12.x 钉死)")"
+  echo "  内核后端     $core$([[ "$core" == mihomo ]] && echo "(版本随项目发布更新)" || echo "(固定 1.12.x)")"
   if _pdg_platform_present; then echo "  手机平台     $(_pdg_platform)"
   else echo "  手机平台     android(⚠️ 平台标记缺失, 按 Android 安全回退; 运行 sudo pdg 触发迁移落定)"; fi
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
@@ -989,7 +989,7 @@ menu(){
     echo "  7) 重启服务"
     echo "  8) 日志"
     echo "  9) 流量 (vnstat)"
-    echo " 10) iOS 描述文件"
+    [[ "$(_pdg_platform)" == ios ]] && echo " 10) iOS 描述文件"   # iOS 专属: Android 不显示
     echo " 11) 诊断报告 (脱敏)"
     echo " 12) 识别内网卡段"
     echo " 13) 卸载"
@@ -1435,5 +1435,5 @@ case "${1:-menu}" in
   hijack-mode)   shift || true; cmd_hijack_mode "${1:-}";;
   switch-core)   shift || true; cmd_switch_core "${1:-}";;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|hijack-mode <all|gfw>|switch-core <mihomo|singbox>|migrate-fw|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios(仅 iOS)|report [--redact-ip|--full]|detect-cidr|hijack-mode <all|gfw>|switch-core <mihomo|singbox>|migrate-fw|uninstall [--purge]]";;
 esac

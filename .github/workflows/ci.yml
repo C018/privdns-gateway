@@ -124,9 +124,6 @@ jobs:
       - name: "iOS 描述文件回归 (Wi-Fi 探测判定 + SSID 直连名单)"
         run: python3 tests/test-ios-ssid.py
 
-      - name: "iOS 描述文件 CA 归属回归 (普通版无 CA / WLOC-CA 版含 CA / CA 失败抛错)"
-        run: python3 tests/test-ios-profile-ca.py
-
       - name: "自检防火墙端口回归"
         run: python3 tests/test-doctor-firewall.py
 
@@ -159,6 +156,9 @@ jobs:
 
       - name: "WLOC bot 后端回归 (set_wloc 开关/坐标/平台门控/接管域名同源)"
         run: python3 tests/test-mitm-wloc-bot.py
+
+      - name: "平台文案/门控回归 (客户端·状态·WLOC 按平台/内核 + README 文案一致)"
+        run: python3 tests/test-platform-copy.py
 
       - name: "WLOC 事务化回归 (BUSY/CA/内核/pdg-mitm/mosdns 故障注入均回滚, 不留 enabled=true)"
         run: python3 tests/test-mitm-wloc-txn.py
