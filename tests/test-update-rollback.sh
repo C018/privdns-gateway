@@ -80,6 +80,20 @@ rc=0; out=$(run "--dir '$SNAP/A' --git 'deadbeefdeadbeef'") || rc=$?
 # 但快照本身仍已恢复(apply 成功)
 [[ "$(cat "$WORK/applied_snapid" 2>/dev/null)" == OLD ]] && ok "  部分失败下配置快照仍已落盘(只是 git 未复位)" || bad "C2"
 
+# ── C3. 跨内核回滚: _core_kernel_activate 失败 → 计入 unrestored, 非0 + "未完全回滚" ──
+# 造"回滚前是 mihomo, 快照是 singbox"的跨内核场景: _pdg_core 首调(pre_core)返 mihomo, 之后返 singbox。
+cat > "$WORK/xcore.sh" <<EOF
+PRE="$WORK/precore"; : > "\$PRE"
+_pdg_core(){ if [[ -s "\$PRE" ]]; then echo singbox; else echo mihomo; printf x > "\$PRE"; fi; }
+pdg_write_unit(){ return 0; }
+_core_kernel_activate(){ return 1; }        # 注入: 快照核激活失败
+EOF
+runx(){ bash -c "source '$WORK/harness.sh'; source '$WORK/xcore.sh'; source '$WORK/rollback.sh'; cmd_rollback $1" 2>&1; }
+rc=0; out=$(runx "--dir '$SNAP/A'") || rc=$?
+{ [[ "$rc" != 0 ]] && grep -q '未完全回滚' <<<"$out" && ! grep -q '✅ 已回滚并重启服务' <<<"$out"; } \
+  && ok "跨内核回滚: 内核激活失败 → 非0 + '未完全回滚' + 不报'✅ 已回滚'" || bad "C3: rc=$rc out=$out"
+grep -q '内核激活' <<<"$out" && ok "  未恢复项明确列出'内核激活'" || bad "C3b: 未列出失败项 out=$out"
+
 # ── D. 静态断言: cmd_update / cmd_snapshot / 越界守卫 ─────────────────────────
 u="$ROOT/deploy/bot/pdg.sh"
 grep -q '更新前快照失败, 中止更新' "$u" && ok "cmd_update: 快照失败即中止(不在无法回滚下继续)" || bad "D1: 缺快照失败中止"

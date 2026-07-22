@@ -59,7 +59,10 @@ assert '[[ "$idx" =~ ^[0-9]+$ ]]' in rollback, "rollback index should reject non
 assert 'idx >= ${#snaps[@]}' in rollback, "rollback index should reject out-of-range input"
 
 # P2-1: cmd_update 装好新脚本后, 必须用"新脚本"跑迁移(否则 v1.2.x 新迁移要等下次命令才生效)
-cmd_update = block_after(pdg, "install -m755 \"$REPO_DIR\"/deploy/bot/pdg.sh", window=400)
+# window 放宽: 必需文件安装改成"任一失败即回滚"的 if 链后, 装 pdg.sh 与调 __migrate 之间
+# 还隔着失败分支 + iOS/健康服务/certbot 钩子等可选文件安装(约 1300 字符); 断言语义不变 ——
+# __migrate 仍必须出现在"装好新 pdg.sh 之后"。
+cmd_update = block_after(pdg, "install -m755 \"$REPO_DIR\"/deploy/bot/pdg.sh", window=1600)
 assert "bash /usr/local/bin/pdg __migrate" in cmd_update, (
     "cmd_update must re-invoke the freshly-installed script for migrations, not call old in-memory funcs"
 )

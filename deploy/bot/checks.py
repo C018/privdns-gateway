@@ -177,7 +177,9 @@ def check_nft():
             continue  # 限定来源的行 / 非 accept 行, 跳过
         m = re.search(r"dport\s*\{?\s*([0-9,\-\s]+)", s)   # 端口集可含区间(如 5228-5230)
         if m:
-            sens = {"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445"}
+            # 7893 = mihomo redir 端口(nft prerouting REDIRECT 的目标): 只该由内网卡来源命中,
+            # 对全网 accept 等于把代理入口暴露成开放中继。sing-box 模式没这条规则 → 不出现即不报。
+            sens = {"53", "80", "81", "443", "853", "5228", "5229", "5230", "7893", "8445"}
             for tok in m.group(1).split(","):
                 tok = tok.strip()
                 if tok.isdigit() and tok in sens:
@@ -187,13 +189,32 @@ def check_nft():
                     leaked |= {p for p in sens if a <= int(p) <= b}
     if leaked:
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
-    return ("ok", "防火墙", "53/80/81/443/853/5228-5230/8445 仅限内网卡来源")
+    return ("ok", "防火墙", "53/80/81/443/853/5228-5230/7893/8445 仅限内网卡来源")
 
 def check_gms():
     """GMS/FCM 推送端口(5228-5230)是否完整启用。只读、不触发迁移: 老装第一次 pdg update
     跑在旧脚本里, 迁移要等下一次 root 管理类命令; 没落地前用 warn 提示(不 fail, 自定义防火墙用户合法缺席)。"""
     if _platform() == "ios":
-        return None                              # iOS 不用 GMS/FCM 推送(苹果走 APNs), 该检查不适用
+        # iOS 走 APNs, 不用 GMS。正常应无残留; 若 sing-box model 仍有 in-gms 或 nft 端口集含 5228 → warn
+        # (应由 migrate_ios_gms_cleanup 清掉; 自定义防火墙形态清不掉时在此提示)。无残留 → None(不显示)。
+        residue = []
+        try:
+            if '"in-gms-5228"' in open(SB).read():
+                residue.append("sing-box 入站")
+        except OSError:
+            pass
+        _, nft, _ = _run(["nft", "list", "ruleset"])
+        if not nft:
+            try:
+                nft = open("/etc/nftables.conf").read()
+            except OSError:
+                nft = ""
+        if re.search(r"tcp dport \{[^}]*5228", nft):
+            residue.append("nft 端口集")
+        if residue:
+            return ("warn", "GMS 残留", "iOS 不应有 GMS 5228-5230, 检出于 " + "、".join(residue)
+                    + "; 运行 sudo pdg __migrate 清理(自定义防火墙形态需手动移除)。")
+        return None
     if _core() == "mihomo":
         # mihomo: 5228-5230 由 nft prerouting REDIRECT 到 redir 端口 + sniffer 处理, 不在 input accept
         _, pre, _ = _run(["nft", "list", "chain", "inet", "pdg", "prerouting"])

@@ -62,6 +62,30 @@ def main():
     pem = mitm_ca.ca_cert_pem()
     assert "BEGIN CERTIFICATE" in pem; ok("ca_cert_pem 返回 PEM(供 iOS 下发)")
 
+    # ── prewarm 严格模式(Issue 5): 默认尽力而为, strict=True 任一域失败即抛 ──
+    real_leaf = mitm_ca.leaf_cert
+    try:
+        def flaky(d):                       # 只有第一个域签得出来
+            if d != "gs-loc.apple.com":
+                raise RuntimeError("leaf boom")
+            return real_leaf(d)
+        mitm_ca.leaf_cert = flaky
+        two = ["gs-loc.apple.com", "gs-loc-cn.apple.com"]
+
+        n = mitm_ca.prewarm(two)            # 默认: 吞掉失败, 返回成功张数(既有调用方语义不变)
+        assert n == 1, n; ok("prewarm 默认尽力而为: 2 域成功 1 → 返回 1 且不抛")
+
+        try:
+            mitm_ca.prewarm(two, strict=True)
+            raise AssertionError("strict=True 应当抛出")
+        except RuntimeError:
+            ok("prewarm(strict=True): 任一域失败即向上抛(供事务整体回滚)")
+
+        mitm_ca.leaf_cert = real_leaf
+        assert mitm_ca.prewarm(two, strict=True) == 2; ok("prewarm(strict=True): 全成功返回全张数(不误伤)")
+    finally:
+        mitm_ca.leaf_cert = real_leaf
+
     print(f"\n通过 {pass_n} 项断言")
 
 

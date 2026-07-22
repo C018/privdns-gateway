@@ -614,6 +614,7 @@ cmd_snapshot(){
               etc/systemd/system/pdg-health.service etc/systemd/system/pdg-health.timer
               etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
               usr/local/bin/pdg usr/local/bin/pdg-set-token
+              usr/local/bin/mihomo usr/local/bin/sing-box
               usr/local/bin/proxy-gateway-open-cert-http.sh usr/local/bin/proxy-gateway-restore-firewall.sh)
   local items=(); local p; for p in "${cand[@]}"; do [[ -e "/$p" ]] && items+=("$p"); done
   # 面板受管开启态: 用净化后的 config 入档(排除真实 config.json, 追加净化版), 快照不含临时监听/密钥/UI。
@@ -710,6 +711,7 @@ cmd_rollback(){
   systemctl daemon-reload
   nft -f /etc/nftables.conf 2>/dev/null || true
   local new_svc; new_svc="$(_pdg_core_svc)"   # 已是快照恢复后的 backend 对应内核
+  local unrestored=()                         # 未能恢复项(内核激活/仓库Git); 非空即"未完全回滚"
   if [[ "$(_pdg_core)" != "$pre_core" ]]; then
     # 跨内核回滚: 旧核 disable+stop, 快照核 enable+start(重生 unit 保正确), 免重启双起
     local old_svc; old_svc="$([[ "$pre_core" == mihomo ]] && echo mihomo || echo sing-box)"
@@ -718,7 +720,11 @@ cmd_rollback(){
     if [[ "$new_svc" == mihomo ]]; then pdg_write_unit pdg_unit_mihomo /etc/systemd/system/mihomo.service
     else pdg_write_unit pdg_unit_singbox /etc/systemd/system/sing-box.service; fi
     systemctl daemon-reload
-    _core_kernel_activate "$new_svc" "$old_svc" || c_y "  跨内核回滚未完全达标(目标 $new_svc / 旧核 $old_svc), 请 pdg doctor 复查"
+    # 激活失败必须计入 unrestored: 快照核没起来就不是"已回滚", 不能只 warn 后照报成功。
+    if ! _core_kernel_activate "$new_svc" "$old_svc"; then
+      c_y "  跨内核回滚未完全达标(目标 $new_svc / 旧核 $old_svc), 请 pdg doctor 复查"
+      unrestored+=("内核激活($new_svc)")
+    fi
     systemctl restart mosdns pdg-bot pdg-probe81 2>/dev/null || true
   else
     systemctl restart mosdns "$new_svc" pdg-bot pdg-probe81 2>/dev/null || true
@@ -726,7 +732,6 @@ cmd_rollback(){
   systemctl is-enabled pdg-mitm >/dev/null 2>&1 && { systemctl reset-failed pdg-mitm 2>/dev/null; systemctl restart pdg-mitm 2>/dev/null; }   # iOS/WLOC: 清 start-limit + 一并恢复 MITM 服务
   systemctl restart systemd-journald 2>/dev/null || true   # journald CanReload=no: 还原封顶需 restart 才生效
   # 仓库 Git 复位(update 回滚: 让 REPO_DIR 与还原出的旧脚本版本一致); 记录未能恢复项, 不谎报"完全回滚"
-  local unrestored=()
   if [[ -n "$git_ref" ]]; then
     if [[ -d "$REPO_DIR/.git" ]] && git -C "$REPO_DIR" reset --hard -q "$git_ref" 2>/dev/null; then
       c_g "  仓库已复位到 ${git_ref:0:12}"
@@ -742,10 +747,67 @@ cmd_rollback(){
   fi
 }
 
+# 内核二进制目录(默认 /usr/local/bin; 测试可用 PDG_CORE_BINDIR 指到沙箱)。
+_core_bindir(){ echo "${PDG_CORE_BINDIR:-/usr/local/bin}"; }
+
+# 用**刚装上的**新内核二进制对现网配置跑 check(显式走路径, 不依赖 PATH)。
+_core_config_check(){
+  local svc="$1" bindir="$2"
+  if [[ "$svc" == mihomo ]]; then
+    "$bindir/mihomo" -t -d /etc/mihomo -f /etc/mihomo/config.yaml >/dev/null 2>&1
+  else
+    "$bindir/sing-box" check -c /etc/sing-box/config.json >/dev/null 2>&1
+  fi
+}
+
+# 内核活性 + 稳定判定: 起得来, 且短暂观察后仍在跑(过滤"起来即崩"的新内核)。
+_core_kernel_stable(){
+  local svc="$1"
+  [[ "$(systemctl is-active "$svc" 2>/dev/null)" == active ]] || return 1
+  sleep 1
+  [[ "$(systemctl is-active "$svc" 2>/dev/null)" == active ]]
+}
+
+# 还原上一版内核二进制并把旧核重新拉起; 返回"旧核是否确实 active"(还原也失败才是真无救)。
+_core_restore_prev(){
+  local svc="$1" bindir="${2:-$(_core_bindir)}"
+  local bin="$bindir/$svc" prev="$bindir/$svc.prev"
+  [[ -f "$prev" ]] && mv -f "$prev" "$bin"
+  systemctl restart "$svc" 2>/dev/null || true
+  [[ "$(systemctl is-active "$svc" 2>/dev/null)" == active ]]
+}
+
+# 内核热切(mihomo/sing-box 同一套): 备份旧核 → 装新 → 配置 check → 重启 → 活性/稳定判定。
+# 关键安全: **确认新核已稳定运行后才删 .prev**; 在此之前任一步失败都还原旧核并 return 1
+# (旧实现在 check 通过时就删了 .prev, 新核重启失败便无核可退)。
+_core_swap_verify(){
+  local svc="$1" newbin="$2" bindir="$3" ver="$4"
+  local bin="$bindir/$svc" prev="$bindir/$svc.prev"
+  cp -a "$bin" "$prev" 2>/dev/null
+  if ! install -m755 "$newbin" "$bin"; then
+    c_y "  新内核安装失败, 还原旧版内核"; _core_restore_prev "$svc" "$bindir" >/dev/null; return 1
+  fi
+  if ! _core_config_check "$svc" "$bindir"; then
+    c_y "  新版与当前配置不兼容(check 失败), 已还原旧版内核"
+    _core_restore_prev "$svc" "$bindir" || c_y "  ⚠️ 旧版内核回退后仍未 active, 请立即 pdg doctor"
+    return 1
+  fi
+  systemctl restart "$svc" 2>/dev/null || true
+  if ! _core_kernel_stable "$svc"; then
+    c_y "  新版内核重启后未稳定运行, 已还原旧版内核并重启"
+    _core_restore_prev "$svc" "$bindir" || c_y "  ⚠️ 旧版内核回退后仍未 active, 请立即 pdg doctor"
+    return 1
+  fi
+  rm -f "$prev"                                   # 到此新核确认可用, 旧核备份才可以删
+  c_g "  → $svc $ver 已装并重启"
+}
+
 # 内核二进制更新: 比对 versions.sh 钉死版本与已装版本, 不一致则下载+SHA校验+装。
-# 关键安全: 先备份旧二进制, 用新二进制对现有配置跑 check, 通过才切换/重启; 失败还原旧版, 不留坏内核。
+# 关键安全: 先备份旧二进制, 用新二进制对现有配置跑 check + 重启稳定判定, 全过才切换; 失败还原旧版, 不留坏内核。
+# 返回: 0=已是钉死版/下载或校验失败(保留现版本, 非致命); 1=换核失败(已还原) → 调用方须回滚整次更新。
 _update_core_binary(){
-  local core march ver tmp prev=""
+  local core march ver tmp bindir
+  bindir="$(_core_bindir)"
   core="$(_pdg_core)"
   # shellcheck source=/dev/null
   source "$REPO_DIR/lib/versions.sh" 2>/dev/null || { c_y "读不到 versions.sh, 跳过内核更新"; return 0; }
@@ -760,13 +822,7 @@ _update_core_binary(){
     pdg_verify_sha256 "$tmp/m.gz" "${PDG_SHA256[mihomo-$march]:-}" "mihomo $ver ($march)" \
       || { c_y "  SHA 校验失败, 保留现版本"; rm -rf "$tmp"; return 0; }
     gunzip -c "$tmp/m.gz" > "$tmp/mihomo" || { c_y "  解压失败, 保留现版本"; rm -rf "$tmp"; return 0; }
-    prev="/usr/local/bin/mihomo.prev"; cp -a /usr/local/bin/mihomo "$prev" 2>/dev/null
-    install -m755 "$tmp/mihomo" /usr/local/bin/mihomo
-    if mihomo -t -d /etc/mihomo -f /etc/mihomo/config.yaml >/dev/null 2>&1; then
-      rm -f "$prev"; systemctl restart mihomo 2>/dev/null || true; c_g "  → mihomo $ver 已装并重启"
-    else
-      [[ -f "$prev" ]] && mv "$prev" /usr/local/bin/mihomo; c_y "  新版与当前配置不兼容(check 失败), 已还原旧版内核"
-    fi
+    if ! _core_swap_verify mihomo "$tmp/mihomo" "$bindir" "$ver"; then rm -rf "$tmp"; return 1; fi
   else
     ver="$SINGBOX_VER"
     sing-box version 2>/dev/null | grep -q "version $ver" && { rm -rf "$tmp"; return 0; }
@@ -776,13 +832,9 @@ _update_core_binary(){
     pdg_verify_sha256 "$tmp/sb.tgz" "${PDG_SHA256[singbox-$march]:-}" "sing-box $ver ($march)" \
       || { c_y "  SHA 校验失败, 保留现版本"; rm -rf "$tmp"; return 0; }
     tar -xzf "$tmp/sb.tgz" -C "$tmp" || { c_y "  解压失败, 保留现版本"; rm -rf "$tmp"; return 0; }
-    prev="/usr/local/bin/sing-box.prev"; cp -a /usr/local/bin/sing-box "$prev" 2>/dev/null
-    install -m755 "$tmp"/sing-box-*/sing-box /usr/local/bin/sing-box
-    if sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
-      rm -f "$prev"; systemctl restart sing-box 2>/dev/null || true; c_g "  → sing-box $ver 已装并重启"
-    else
-      [[ -f "$prev" ]] && mv "$prev" /usr/local/bin/sing-box; c_y "  新版与当前配置不兼容, 已还原旧版内核"
-    fi
+    cp -f "$tmp"/sing-box-*/sing-box "$tmp/sing-box" 2>/dev/null \
+      || { c_y "  解压产物缺失, 保留现版本"; rm -rf "$tmp"; return 0; }
+    if ! _core_swap_verify sing-box "$tmp/sing-box" "$bindir" "$ver"; then rm -rf "$tmp"; return 1; fi
   fi
   rm -rf "$tmp"
 }
@@ -813,19 +865,29 @@ cmd_update(){
   if [[ -z "$tgt" ]]; then
     c_y "仓库没有发布 tag(v*), 中止更新。"; return 1
   fi
-  git -C "$REPO_DIR" reset --hard -q "$tgt"
+  if ! git -C "$REPO_DIR" reset --hard -q "$tgt"; then
+    c_y "git reset 到 $tgt 失败, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
   c_g "→ 已切到发布 $tgt"
   c_g "刷新代码(配置/出口/token/证书均不动)…"
-  install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py           /opt/pdg-bot/bot.py
-  install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/sb2mihomo.py        /opt/pdg-bot/
+  # 必需文件: 任一装失败即立即回滚(拒绝新旧混部)。`! A || ! B` 在首个失败处短路。
+  if   ! install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py           /opt/pdg-bot/bot.py \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py       /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/checks.py            /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/doctor.py            /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/sb2mihomo.py        /opt/pdg-bot/ \
+    || ! install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh   /usr/local/bin/ \
+    || ! install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh /usr/local/bin/ \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/pdg-set-token.sh     /usr/local/bin/pdg-set-token \
+    || ! install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg; then
+    c_y "必需文件安装失败, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
   # iOS 专属组件按平台部署: Android 更新不把 iOS 文件装回来(migrate_android_cleanup 亦会清残留)。
+  # 平台/可选文件容错(不据此回滚): iOS 未启 WLOC 时 mitm 缺席合法; certbot 钩子目录在无 certbot 机上不存在。
   if [[ "$(_pdg_platform)" == ios ]]; then
     install -m755 "$REPO_DIR"/deploy/bot/mitm_ca.py          /opt/pdg-bot/ 2>/dev/null || true
     install -m755 "$REPO_DIR"/deploy/bot/mitm_server.py      /opt/pdg-bot/ 2>/dev/null || true
@@ -835,15 +897,15 @@ cmd_update(){
   fi
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
-  install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh   /usr/local/bin/
-  install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh /usr/local/bin/
-  install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh     /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
-  install -m755 "$REPO_DIR"/deploy/bot/pdg-set-token.sh     /usr/local/bin/pdg-set-token
-  install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
+  install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh     /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh 2>/dev/null || true
   # 迁移用"刚装好的新脚本"跑(本进程还是旧 bash, 直接调会用旧版函数 → 新迁移要等下次命令才生效)。
-  bash /usr/local/bin/pdg __migrate
+  if ! bash /usr/local/bin/pdg __migrate; then
+    c_y "迁移(__migrate)失败, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
   # 内核二进制: 按 versions.sh 钉死版本更新(mihomo 可持续升版; sing-box 仍钉 1.12.x)。
-  _update_core_binary
+  if ! _update_core_binary; then
+    c_y "内核二进制更新失败, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
@@ -860,7 +922,9 @@ cmd_update(){
   if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then
     c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
-  systemctl daemon-reload
+  if ! systemctl daemon-reload; then
+    c_y "systemctl daemon-reload 失败, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
   systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
   systemctl restart pdg-bot pdg-probe81 2>/dev/null || true
   systemctl is-enabled pdg-mitm >/dev/null 2>&1 && { systemctl reset-failed pdg-mitm 2>/dev/null; systemctl restart pdg-mitm 2>/dev/null; }   # iOS/WLOC: 清 start-limit + 载新插件代码, 否则 doctor 判 pdg-mitm 未运行而误回滚
@@ -897,7 +961,8 @@ cmd_token(){ need_root token; pdg-set-token; }   # 不 exec, 设完/取消都回
 # shellcheck disable=SC2086  # $svcs 是有意按空白分词的服务名列表
 cmd_restart(){ need_root restart; local svcs; svcs="$(_pdg_svcs)"; systemctl restart $svcs 2>/dev/null; echo "已重启: $svcs"; }
 
-cmd_log(){ journalctl -u pdg-bot -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
+# 内核日志跟当前后端走(mihomo 机上取 sing-box 只会得到空日志), 与 report.py 同口径。
+cmd_log(){ journalctl -u pdg-bot -u mosdns -u "$(_pdg_core_svc)" -n "${1:-40}" --no-pager -o cat; }
 
 cmd_traffic(){ command -v vnstat >/dev/null && vnstat || echo "vnstat 未装: sudo apt install -y vnstat && systemctl enable --now vnstat"; }
 
@@ -1218,18 +1283,17 @@ PY
       else c_y "  生成失败 → 还原。"; cp -a "$bak" "$sb"; fi
     else rm -f "$bak" 2>/dev/null; fi
   fi
-  # 2) nft: 移除 5228-5230(原装端口集形态)+ mihomo REDIRECT 形态
-  if [[ -f "$nf" ]] && grep -qE '5228' "$nf"; then
+  # 2) nft: 只从**端口集**精确移除 5228-5230(复用 _pdg_nft_strip_gms, 保留整条 { 80, 443 } redirect),
+  #    绝不按行删 redirect。仅当端口集(非注释)真含 5228 才动; 剥完仍残留=自定义形态 → 还原不破坏(交 doctor warn)。
+  if [[ -f "$nf" ]] && grep -qE 'tcp dport [{][^}]*5228' "$nf"; then
     local bak; bak="$nf.preiosgms.$(date +%s)"
     if cp -a "$nf" "$bak" 2>/dev/null; then
-      sed -E -i 's#(tcp dport [{] 53, 80, 81, 443, 853), 5228-5230, 8445 [}] accept#\1, 8445 } accept#' "$nf"
-      sed -i -E '/(5228|5229|5230).*redirect|redirect.*(5228|5229|5230)/d' "$nf"   # mihomo REDIRECT 行
-      if grep -qE '5228' "$nf"; then
-        : # 仍有 5228(自定义形态)→ 不强改, 已在上面尽力; 交 doctor
-      fi
-      if nft -c -f "$nf" >/dev/null 2>&1; then
-        nft -f "$nf" 2>/dev/null || true; rm -f "$bak"; c_g "  iOS: 已从防火墙移除 GMS 5228-5230。"
-      else c_y "  nft 校验失败 → 还原。"; cp -a "$bak" "$nf"; nft -f "$nf" 2>/dev/null || true; fi
+      _pdg_nft_strip_gms "$nf"
+      if grep -qE 'tcp dport [{][^}]*5228' "$nf"; then
+        c_y "  防火墙 5228-5230 非原装形态, 未自动改(交 doctor); 已还原。"; cp -a "$bak" "$nf" 2>/dev/null; rm -f "$bak"
+      elif nft -c -f "$nf" >/dev/null 2>&1; then
+        nft -f "$nf" 2>/dev/null || true; rm -f "$bak"; c_g "  iOS: 已从防火墙端口集移除 GMS 5228-5230(保留 80/443 redirect)。"
+      else c_y "  nft 校验失败 → 还原。"; cp -a "$bak" "$nf" 2>/dev/null; nft -f "$nf" 2>/dev/null || true; rm -f "$bak"; fi
     fi
   fi
   return 0

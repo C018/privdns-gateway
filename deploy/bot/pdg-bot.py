@@ -537,13 +537,16 @@ def _mitm_transact(new_wloc):
         try:
             _wloc_save(new_wloc)                                     # 1. 写新 mitm.json(原子, 内部 os.replace)
             doms = _mitm_enabled_domains()
-            if doms:                                                # 2. CA(有域名才需)
+            if doms:                                                # 2. CA + 叶子证书(有域名才需)
                 try:
                     import mitm_ca
                     mitm_ca.ensure_ca()
-                    mitm_ca.prewarm(doms)                           # 预热两 gs-loc 叶子证书(免首连抖动)
+                    warmed = mitm_ca.prewarm(doms, strict=True)     # 严格预签: 少一张就抛, 不容"半套证书"上线
                 except Exception as e:  # noqa: BLE001
                     _restore(); return False, "MITM 根 CA 生成失败(%s), 已回滚。" % type(e).__name__
+                if warmed != len(doms):                             # 不吞返回值: 张数对不上同样整体回滚
+                    _restore()
+                    return False, "MITM 叶子证书预签不完整(%d/%d), 已回滚。" % (warmed, len(doms))
             _atomic_write_text(MITM_HIJACK_FILE,                    # 3. 写 hijack(原子)
                                "".join("domain:" + d + "\n" for d in doms))
             ok, err = _apply_sb_inner(lambda c: None)               # 4. 渲染内核 + 校验 + 稳定 active
@@ -2820,10 +2823,10 @@ def handle_cb(chat, mid, data):
              "① 添加地点并开启 WLOC\n"
              "② 返回「📱 客户端」，重新生成并安装 iOS 描述文件\n"
              "③ 到「设置 → 通用 → 关于本机 → 证书信任设置」，信任 PrivDNS Gateway MITM CA\n\n"
-             "<b>手机端(全程用内网卡):</b>\n"
-             "· 控制中心关 WiFi(把图标点灰，不是在设置里关)\n"
-             "· 关闭再开启定位服务:设置 → 隐私与安全性 → 定位服务\n"
-             "· 若位置没有刷新，请重新开关定位服务或重启手机",
+             "<b>手机端（全程用内网卡）：</b>\n"
+             "· 首次 / 后续无法定位时：设置 → 通用 → 传输或还原 iPhone → 还原 → 还原位置与隐私 → 重启手机\n"
+             "· 关闭再开启定位服务：设置 → 隐私与安全性 → 定位服务\n"
+             "· 控制中心关 Wi-Fi（把图标点灰，不是在设置里关）",
              {"inline_keyboard": [
                  [{"text": "🟢 已开启" if on else "✅ 开启", "callback_data": "wloc:on"},
                   {"text": "关闭", "callback_data": "wloc:off"}],

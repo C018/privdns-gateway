@@ -103,6 +103,12 @@ jobs:
       - name: "更新快照+精确回滚回归 (--dir 精确目标/--git 复位/部分失败不谎报/快照覆盖脚本)"
         run: bash tests/test-update-rollback.sh
 
+      - name: "update 关键步骤故障注入 (git reset/必需文件/迁移/内核/daemon-reload 失败均回滚且不谎报成功)"
+        run: bash tests/test-update-faults.sh
+
+      - name: "内核热切回归 (check/重启不稳定均还原旧核; 稳定后才删 .prev; 快照含内核二进制)"
+        run: bash tests/test-core-swap.sh
+
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
 
@@ -159,6 +165,12 @@ jobs:
 
       - name: "平台文案/门控回归 (客户端·状态·WLOC 按平台/内核 + README 文案一致)"
         run: python3 tests/test-platform-copy.py
+
+      - name: "诊断报告内核一致性 (版本/日志按当前后端取, mihomo 机上不再固定问 sing-box)"
+        run: python3 tests/test-report-backend.py
+
+      - name: "WLOC 手机端文案一致性 (README/Bot 同一套三步 + 平台隔离)"
+        run: python3 tests/test-wloc-copy.py
 
       - name: "WLOC 事务化回归 (BUSY/CA/内核/pdg-mitm/mosdns 故障注入均回滚, 不留 enabled=true)"
         run: python3 tests/test-mitm-wloc-txn.py

@@ -60,7 +60,7 @@ migrate_fw_gms "$WORK/nf"
 grep -q '5228' "$WORK/nf" && bad "iOS 不应补 GMS 防火墙端口" || ok "migrate_fw_gms: iOS 跳过(不补 5228-5230)"
 
 # ── C. migrate_ios_gms_cleanup: 删 in-gms-* + nft 移除 5228-5230 ────────────────
-eval "$(xt migrate_ios_gms_cleanup)"; _pdg_core_svc(){ echo sing-box; }
+eval "$(xt migrate_ios_gms_cleanup)"; eval "$(xt _pdg_nft_strip_gms)"; _pdg_core_svc(){ echo sing-box; }
 cat > "$WORK/sbg.json" <<'JSON'
 {"inbounds":[{"type":"direct","tag":"in-https","listen_port":443},
              {"type":"direct","tag":"in-gms-5228","listen_port":5228},
@@ -84,6 +84,24 @@ cat > "$WORK/sba.json" <<'JSON'
 JSON
 migrate_ios_gms_cleanup "$WORK/sba.json" "$WORK/nfg"
 grep -q 'in-gms-5228' "$WORK/sba.json" && ok "Android: iOS GMS 清理不执行(保留 GMS)" || bad "Android 误删了 GMS"
+
+# ── C3. mihomo REDIRECT 形态: 只从端口集去 5228-5230, 必须保留整条 { 80, 443 } redirect ──
+# 回归: 旧实现 sed 按行删含 5228 的 redirect → 连 80/443 一起删掉 → 网关 80/443 不再 REDIRECT 到 mihomo(断网)。
+_pdg_platform(){ echo ios; }
+printf 'table inet pdg {\n\tchain prerouting {\n\t\ttype nat hook prerouting priority dstnat; policy accept;\n\t\tip saddr 172.22.0.0/16 tcp dport { 80, 443, 5228-5230 } redirect to :7893\n\t}\n}\n' > "$WORK/nfmh"
+migrate_ios_gms_cleanup "$WORK/none-sb.json" "$WORK/nfmh"   # sb 不存在 → 只走 nft 分支
+grep -qE 'tcp dport [{][^}]*5228' "$WORK/nfmh" && bad "mihomo: 端口集仍含 5228-5230" || ok "mihomo: 端口集已精确去掉 5228-5230"
+grep -qF 'tcp dport { 80, 443 } redirect to :7893' "$WORK/nfmh" && ok "mihomo: { 80, 443 } redirect 整条保留(不再误删)" || bad "mihomo: 80/443 redirect 被误删!"
+snap="$(cat "$WORK/nfmh")"; migrate_ios_gms_cleanup "$WORK/none-sb.json" "$WORK/nfmh"
+[[ "$(cat "$WORK/nfmh")" == "$snap" ]] && ok "mihomo REDIRECT 清理幂等(二跑不变)" || bad "二跑改动了 nft"
+# nft 语法校验(仅当有真 nft 二进制; type -P 只找可执行文件, 绕开本测试里的 nft() 桩)
+if _nftbin="$(type -P nft 2>/dev/null)" && [[ -n "$_nftbin" ]]; then
+  "$_nftbin" -c -f "$WORK/nfmh" >/dev/null 2>&1 && ok "迁移后 nft -c 校验通过" || bad "迁移后 nft -c 校验不过"
+else ok "迁移后 nft -c 校验(无 nft 二进制, 跳过)"; fi
+# 自定义/非原装 5228 形态(逐端口而非区间)无法安全识别 → 还原不破坏
+printf 'table inet pdg {\n\tchain prerouting { ip saddr X tcp dport { 80, 443, 5228, 5229, 5230 } redirect to :7893 }\n}\n' > "$WORK/nfcustom"
+snapc="$(cat "$WORK/nfcustom")"; migrate_ios_gms_cleanup "$WORK/none-sb.json" "$WORK/nfcustom"
+[[ "$(cat "$WORK/nfcustom")" == "$snapc" ]] && ok "自定义 5228 形态无法安全识别 → 还原不破坏配置" || bad "破坏了自定义配置"
 
 # ── C2. _pdg_nft_strip_gms: iOS 渲染后剥掉 GMS(装机/切核共用)──────────────────
 eval "$(xt _pdg_nft_strip_gms)"

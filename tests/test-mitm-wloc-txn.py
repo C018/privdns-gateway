@@ -33,6 +33,8 @@ class Ctx:
     svc = {}            # unit -> bool(_svc_active)
     ca_raises = False
     sh_fail = set()     # units whose `systemctl restart` returns rc!=0
+    prewarm_n = None    # None=全部成功; int=只成功这么多张叶子证书(不抛异常)
+    prewarm_raises = False   # True=预签抛异常(严格模式下真实 prewarm 的行为)
 
 
 @contextlib.contextmanager
@@ -51,6 +53,15 @@ def _ensure_ca():
     return "/x/ca.crt"
 
 
+def _prewarm(d, strict=False):
+    """故意"短返回但不抛"—— 独立验证调用方是否真的检查了 prewarm 的返回张数,
+    而不是只靠严格模式抛异常兜底。"""
+    if Ctx.prewarm_raises:
+        raise RuntimeError("leaf boom")
+    doms = list(d or [])
+    return len(doms) if Ctx.prewarm_n is None else Ctx.prewarm_n
+
+
 def setup():
     tmp = tempfile.mkdtemp()
     bot.MITM_CONFIG = os.path.join(tmp, "mitm.json")
@@ -62,7 +73,7 @@ def setup():
     bot._svc_active = lambda unit, **k: Ctx.svc.get(unit, True)
     bot.sh = _sh
     mitm_ca.ensure_ca = _ensure_ca
-    mitm_ca.prewarm = lambda d: len(d or [])
+    mitm_ca.prewarm = _prewarm
 
 
 OLD = {"enabled": False, "accuracy": 50, "active": "old", "locations": [{"name": "old", "lat": 1.0, "lon": 2.0}]}
@@ -74,6 +85,7 @@ def reset_old():
     bot._wloc_save(OLD)
     bot._atomic_write_text(bot.MITM_HIJACK_FILE, "")
     Ctx.guard_ok = True; Ctx.apply_ret = (True, ""); Ctx.svc = {}; Ctx.ca_raises = False; Ctx.sh_fail = set()
+    Ctx.prewarm_n = None; Ctx.prewarm_raises = False
 
 
 def enabled_on_disk():
@@ -112,6 +124,42 @@ def main():
     assert okr is False and "CA" in msg; ok("CA 失败: 返回失败(提示 CA)")
     assert enabled_on_disk() is False and hijack_on_disk().strip() == ""; ok("CA 失败: mitm.json/hijack 回滚旧态(不留 enabled=true)")
 
+    # ── 叶子证书预签(Issue 5): 少签一张就必须整体回滚, 不得"没证书却显示已启用" ──
+    reset_old()
+    bot._wloc_save(NEW)
+    ndom = len(bot._mitm_enabled_domains())     # 实际需要的域名数(gs-loc / gs-loc-cn)
+    assert ndom >= 2, ndom
+    reset_old()
+
+    # 全失败: prewarm 返回 0 且不抛 → 调用方必须自己查返回张数
+    reset_old(); Ctx.prewarm_n = 0
+    okr, msg = bot._mitm_transact(NEW)
+    assert okr is False and "叶子证书" in msg; ok("叶子证书全失败(prewarm 返回0): 返回失败(提示叶子证书)")
+    assert enabled_on_disk() is False and hijack_on_disk().strip() == ""
+    ok("叶子全失败: mitm.json/hijack 回滚旧态(WLOC 不显示已启用)")
+
+    # 部分失败: 2 域只成功 1 → 同样整体回滚(不允许"半套证书"上线)
+    reset_old(); Ctx.prewarm_n = ndom - 1
+    okr, msg = bot._mitm_transact(NEW)
+    assert okr is False and "叶子证书" in msg; ok("叶子证书部分失败(%d/%d): 返回失败" % (ndom - 1, ndom))
+    assert enabled_on_disk() is False and hijack_on_disk().strip() == ""
+    ok("叶子部分失败: 全量回滚(mitm.json + hijack 均回旧态)")
+
+    # leaf_cert 抛异常(严格模式向上传播)→ 回滚
+    reset_old(); Ctx.prewarm_raises = True
+    okr, msg = bot._mitm_transact(NEW)
+    assert okr is False; ok("叶子证书签发抛异常: 返回失败")
+    assert enabled_on_disk() is False and hijack_on_disk().strip() == ""
+    ok("叶子抛异常: 全量回滚(不留 enabled=true)")
+    assert "leaf boom" not in msg and "/" not in msg; ok("失败提示不泄露内部路径/异常细节")
+
+    # 全部成功 → 正常启用(证明严格化没误伤正常路径)
+    reset_old(); Ctx.prewarm_n = None
+    okr, msg = bot._mitm_transact(NEW)
+    assert okr, msg
+    assert enabled_on_disk() is True and "gs-loc.apple.com" in hijack_on_disk()
+    ok("叶子证书全部签发成功: 正常启用(严格化不误伤)")
+
     # ── 内核校验/应用失败 → 回滚 ──
     reset_old(); Ctx.apply_ret = (False, "mihomo -t 失败")
     okr, msg = bot._mitm_transact(NEW)
@@ -139,6 +187,7 @@ def main():
     # ── 关闭(new=OLD-like disabled): 无域名 → 停 pdg-mitm, hijack 清空, 成功 ──
     bot._wloc_save(NEW); bot._atomic_write_text(bot.MITM_HIJACK_FILE, "domain:gs-loc.apple.com\n")  # 先造"开启态"
     Ctx.guard_ok = True; Ctx.apply_ret = (True, ""); Ctx.svc = {}; Ctx.ca_raises = False; Ctx.sh_fail = set()
+    Ctx.prewarm_n = None; Ctx.prewarm_raises = False
     okr, msg = bot._mitm_transact({**NEW, "enabled": False})
     assert okr, msg
     assert enabled_on_disk() is False and hijack_on_disk().strip() == ""; ok("关闭: enabled=False + 清空 hijack(无域名不需 CA)")

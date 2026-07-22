@@ -6,11 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 checks_src = (ROOT / "deploy/bot/checks.py").read_text(encoding="utf-8")
 
-assert '{"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445"}' in checks_src, (
-    "doctor firewall leak detection must include TG SOCKS5 8445 and GMS 5228-5230"
+assert '{"53", "80", "81", "443", "853", "5228", "5229", "5230", "7893", "8445"}' in checks_src, (
+    "doctor firewall leak detection must include TG SOCKS5 8445, GMS 5228-5230 and mihomo redir 7893"
 )
-assert "53/80/81/443/853/5228-5230/8445" in checks_src, (
-    "doctor firewall OK text should mention 8445 and 5228-5230"
+assert "53/80/81/443/853/5228-5230/7893/8445" in checks_src, (
+    "doctor firewall OK text should mention 8445, 5228-5230 and 7893"
 )
 
 # 动态: 端口区间写法(如 5228-5230)对全网开放也要被识别为泄露; 限内网来源则不报。
@@ -41,6 +41,28 @@ checks._run = lambda cmd: (0, "chain input {\n ip saddr 172.22.0.0/16 tcp dport 
 st, _, msg = checks.check_nft()
 assert st == "ok", (st, msg)
 
+# ── mihomo redir 端口 7893(Issue 6) ──
+# 对全网 accept → fail(代理入口被暴露成开放中继)
+checks._run = lambda cmd: (0, "chain input {\n tcp dport { 22 } accept\n"
+                              " tcp dport { 7893 } accept\n}", "")
+st, _, msg = checks.check_nft()
+assert st == "fail" and "7893" in msg, (st, msg)
+
+# 限内网来源(mihomo 原装模板形态)→ ok, 不误报
+checks._run = lambda cmd: (0, "chain input {\n ip saddr 172.22.0.0/16 tcp dport { 53, 80-81, 443, 853, 5228-5230, 7893, 8445 } accept\n}", "")
+st, _, msg = checks.check_nft()
+assert st == "ok", (st, msg)
+
+# 宽区间对全网开放要把 7893 一并报出
+checks._run = lambda cmd: (0, "chain input {\n tcp dport { 7000-8000 } accept\n}", "")
+st, _, msg = checks.check_nft()
+assert st == "fail" and "7893" in msg, (st, msg)
+
+# sing-box 模式(规则里根本没有 7893)→ 不因"缺 7893"误报
+checks._run = lambda cmd: (0, "chain input {\n ip saddr 172.22.0.0/16 tcp dport { 53, 80-81, 443, 853, 5228-5230, 8445 } accept\n}", "")
+st, _, msg = checks.check_nft()
+assert st == "ok", (st, msg)
+
 # ── check_gms: sing-box 三入站 + 防火墙内网放行 → ok; 任一缺失 → warn(不 fail) ──
 import json, tempfile
 
@@ -66,5 +88,29 @@ assert st == "warn", (st, msg)
 
 st, _, msg = gms_case([443, 80], NFT_NO_GMS)                    # 双缺也只 warn, 不 fail
 assert st == "warn", (st, msg)
+
+# ── check_gms iOS: 正常无残留 → None(不显示); sing-box/nft 端口集残留 5228 → warn ──
+_orig_platform = checks._platform
+checks._platform = lambda: "ios"
+try:
+    def ios_case(sb_text, nft_out):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write(sb_text)
+            checks.SB = f.name
+        checks._run = lambda cmd: (0, nft_out, "")
+        return checks.check_gms()
+
+    # 干净 iOS: sing-box 无 in-gms, nft 无 5228 → None
+    assert ios_case('{"inbounds": []}', "chain prerouting {\n ip saddr 172.22.0.0/16 tcp dport { 80, 443 } redirect to :7893\n}") is None
+
+    # sing-box 仍带 in-gms-5228 入站 → warn 指出 sing-box
+    r = ios_case('{"inbounds": [{"tag": "in-gms-5228", "listen_port": 5228}]}', "chain input {}")
+    assert r is not None and r[0] == "warn" and "sing-box" in r[2], r
+
+    # nft 端口集残留 5228-5230 → warn 指出 nft
+    r = ios_case('{"inbounds": []}', "chain prerouting {\n ip saddr 172.22.0.0/16 tcp dport { 80, 443, 5228-5230 } redirect to :7893\n}")
+    assert r is not None and r[0] == "warn" and "nft" in r[2], r
+finally:
+    checks._platform = _orig_platform
 
 print("doctor-firewall regression OK")

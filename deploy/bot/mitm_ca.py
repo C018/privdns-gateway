@@ -144,16 +144,19 @@ def leaf_cert(domain):
     return crt, key
 
 
-def prewarm(domains):
+def prewarm(domains, strict=False):
     """预签一组域名叶子证书(WLOC 开启时调用, 免首个 TLS 连接现签的并发抖动)。
-    尽力而为: 单域失败不影响其它。返回成功签发/命中的域名数。"""
+    默认尽力而为: 单域失败不影响其它, 返回成功签发/命中的域名数(保持既有调用方语义不变)。
+    strict=True(事务化调用): 任一域签发失败立即向上抛, 不吞异常 —— 由调用方整体回滚,
+    避免"叶子证书没签出来却把 WLOC 标成已启用"。"""
     n = 0
     for d in domains or []:
         try:
             leaf_cert(d)
             n += 1
         except Exception:  # noqa: BLE001
-            pass
+            if strict:
+                raise
     return n
 
 
