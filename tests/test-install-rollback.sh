@@ -38,8 +38,10 @@ xfn(){
       if (depth <= 0) exit
     }' "$ROOT/install.sh"
 }
-xfn rollback  >  "$WORK/fn.sh"
-xfn on_exit   >> "$WORK/fn.sh"
+xfn _stash_bin   >  "$WORK/fn.sh"
+xfn _restore_bin >> "$WORK/fn.sh"
+xfn rollback     >> "$WORK/fn.sh"
+xfn on_exit      >> "$WORK/fn.sh"
 grep -q '^rollback(){' "$WORK/fn.sh" && grep -q '^on_exit(){' "$WORK/fn.sh" \
   || { echo "抽取 rollback/on_exit 失败"; exit 1; }
 # 防呆: 抽出来的东西不该含安装流程的指令(抽多了会真的去跑 apt-get)
@@ -131,6 +133,68 @@ out=$(SB="$SB" bash "$WORK/prog.sh" 2>&1); rc=$?
 grep -q '原始安装错误' <<<"$out" && ok "F: 原始安装错误仍可见" || bad "F: 原始错误被掩盖"
 grep -q 'unbound variable' <<<"$out" && bad "F: 回滚过程报 unbound variable" || ok "F: 回滚过程无 unbound variable"
 [[ "$(cat "$SB/etc/resolv.conf")" == "ORIG-RESOLV" ]] && ok "F: 走 EXIT trap 时系统级还原完整" || bad "F: EXIT trap 下还原不完整"
+
+# ── H. 装前已存在(本次被覆盖) → 回滚还原**原件**, 不是删掉 ────────────────
+# 别人装的 mosdns/sing-box/mihomo(哪怕版本不同)不算"本次新增", 覆盖前留了 .pdg-preinstall。
+mk_sandbox
+printf 'OLD-SINGBOX-v1.9\n' > "$SB/usr/local/bin/sing-box.pdg-preinstall"   # 覆盖前留的原件
+OLDSHA=$(sha256sum "$SB/usr/local/bin/sing-box.pdg-preinstall" | cut -d' ' -f1)
+printf 'NEW-SINGBOX-v1.12\n' > "$SB/usr/local/bin/sing-box"                 # 本次装上去的新版
+out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=1; RESOLVED_DISABLED=0')
+if [[ -e "$SB/usr/local/bin/sing-box" ]] \
+   && [[ "$(sha256sum "$SB/usr/local/bin/sing-box" | cut -d' ' -f1)" == "$OLDSHA" ]]; then
+  ok "H: 覆盖了装前已有的 sing-box → 回滚按 sha 还原原件(不误删别人的)"
+else bad "H: 未还原原件 (内容=$(cat "$SB/usr/local/bin/sing-box" 2>/dev/null || echo 已删))"; fi
+[[ ! -e "$SB/usr/local/bin/sing-box.pdg-preinstall" ]] && ok "H: 还原后 .pdg-preinstall 备份已清理" || bad "H: 备份残留"
+[[ "$(cat "$SB/etc/resolv.conf")" == "ORIG-RESOLV" ]] && ok "H: 系统级还原仍完整" || bad "H: 系统级还原不完整"
+
+# ── I. 装前不存在(纯新增) → 仍然删掉 ─────────────────────────────────────
+mk_sandbox
+rm -f "$SB/usr/local/bin/mihomo.pdg-preinstall"      # 无原件备份 = 本次新增
+out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; MIHOMO_INSTALLED=1; RESOLVED_DISABLED=0')
+[[ ! -e "$SB/usr/local/bin/mihomo" ]] && ok "I: 装前不存在的 mihomo(无备份) → 仍按新增删除" || bad "I: 本次新增的 mihomo 未删"
+
+# ── J. _stash_bin 语义 + 成功路径清理备份 ─────────────────────────────────
+mk_sandbox
+out=$(env SB="$SB" bash -c "set -uo pipefail
+$(harness)
+source '$WORK/fn.sh'
+_stash_bin '$SB/usr/local/bin/mihomo'          # 存在 → 应留备份
+_stash_bin '$SB/usr/local/bin/nonexistent'     # 不存在 → 不留备份且返回0
+echo rc=\$?" 2>&1)
+[[ -e "$SB/usr/local/bin/mihomo.pdg-preinstall" ]] && ok "J: _stash_bin 对已存在的二进制留了原件备份" || bad "J: 未留备份"
+[[ ! -e "$SB/usr/local/bin/nonexistent.pdg-preinstall" ]] && grep -q 'rc=0' <<<"$out" \
+  && ok "J: _stash_bin 对不存在的二进制不留备份且返回 0(装前没有不算异常)" || bad "J: 空 stash 行为不对 out=$out"
+
+# 成功安装(INSTALL_OK=1) → on_exit 清掉所有 .pdg-preinstall, 且不动二进制本身
+printf 'x\n' > "$SB/usr/local/bin/sing-box.pdg-preinstall"
+out=$(env SB="$SB" bash -c "set -uo pipefail
+$(harness)
+INSTALL_OK=1
+source '$WORK/fn.sh'
+on_exit 0" 2>&1)
+if [[ ! -e "$SB/usr/local/bin/mihomo.pdg-preinstall" && ! -e "$SB/usr/local/bin/sing-box.pdg-preinstall" ]]; then
+  ok "J: 安装成功 → .pdg-preinstall 备份被清理干净"
+else bad "J: 成功后备份残留"; fi
+[[ -e "$SB/usr/local/bin/mihomo" && -e "$SB/usr/local/bin/sing-box" ]] \
+  && ok "J: 成功路径不动二进制本身(只清备份)" || bad "J: 成功路径误删了二进制"
+
+# ── K. 静态守卫: 三个二进制的安装点前必须先 _stash_bin(将来新增安装路径不能漏留原件) ──
+for b in mosdns sing-box mihomo; do
+  if awk -v b="$b" '
+      { buf[NR] = $0 }
+      $0 ~ ("install -m755 .*/usr/local/bin/" b "([^-a-zA-Z0-9_.]|$)") {
+        found = 0
+        for (i = NR - 3; i < NR; i++)
+          if (i > 0 && buf[i] ~ ("_stash_bin /usr/local/bin/" b "([^-a-zA-Z0-9_.]|$)")) found = 1
+        if (!found) bad = 1
+      }
+      END { exit bad ? 1 : 0 }' "$ROOT/install.sh"; then
+    ok "K: $b 安装点之前已调用 _stash_bin"
+  else
+    bad "K: $b 的安装点未先 _stash_bin → 回滚会误删装前已有的 $b"
+  fi
+done
 
 # ── G. 静态守卫: trap 路径读到的每个变量, 要么在 trap 注册前初始化, 要么引用处一律带 :- 默认值 ──
 trapline=$(grep -n "^trap 'on_exit" "$ROOT/install.sh" | cut -d: -f1)

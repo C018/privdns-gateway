@@ -95,6 +95,22 @@ if [[ "$PRIOR_INSTALL" == 1 ]]; then
   pdg snapshot >/dev/null 2>&1 || c_y "  (快照失败, 仍继续; 万一失败可能无法自动恢复)"
 fi
 
+# 覆盖既有内核/解析器二进制前先留一份原件。别人装的 mosdns/sing-box/mihomo(哪怕版本
+# 不同)不算"本次新增", 回滚时应当还原原件而不是删掉。
+_stash_bin(){
+  [[ -e "$1" ]] && cp -a "$1" "$1.pdg-preinstall" 2>/dev/null
+  return 0                        # 装前不存在(没什么可留)也算正常
+}
+# 回滚用: 有原件就还原回去, 没有则说明是本次新增 → 删掉。返回非 0 表示这项没弄干净。
+_restore_bin(){
+  local p="$1"
+  if [[ -e "$p.pdg-preinstall" ]]; then
+    mv -f "$p.pdg-preinstall" "$p" 2>/dev/null
+  else
+    rm -f "$p" 2>/dev/null
+  fi
+}
+
 rollback(){
   # set +e 只关 errexit, nounset 仍然生效 → 下面一律用 ${VAR:-0} 兜底, 不整体关 nounset。
   set +e
@@ -116,10 +132,11 @@ rollback(){
   nft delete table inet pdg 2>/dev/null
   rm -rf /etc/mosdns /etc/sing-box /etc/mihomo /opt/pdg-bot /etc/privdns-gateway
   rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
-  # 只删本次安装新增的二进制: *_INSTALLED 仅在真正下载并安装后才置 1, 装前就有的一律不动。
-  [[ "${MOSDNS_INSTALLED:-0}"  == 1 ]] && { rm -f /usr/local/bin/mosdns   || failed+=("移除 mosdns"); }
-  [[ "${SINGBOX_INSTALLED:-0}" == 1 ]] && { rm -f /usr/local/bin/sing-box || failed+=("移除 sing-box"); }
-  [[ "${MIHOMO_INSTALLED:-0}"  == 1 ]] && { rm -f /usr/local/bin/mihomo   || failed+=("移除 mihomo"); }
+  # 只撤本次安装对二进制的改动: *_INSTALLED 仅在真正下载并安装后才置 1。装前不存在的删掉,
+  # 装前已存在(本次被覆盖)的还原回原件 —— 两种情况都不会留下"别人的二进制被我们删了"。
+  [[ "${MOSDNS_INSTALLED:-0}"  == 1 ]] && { _restore_bin /usr/local/bin/mosdns   || failed+=("还原/移除 mosdns"); }
+  [[ "${SINGBOX_INSTALLED:-0}" == 1 ]] && { _restore_bin /usr/local/bin/sing-box || failed+=("还原/移除 sing-box"); }
+  [[ "${MIHOMO_INSTALLED:-0}"  == 1 ]] && { _restore_bin /usr/local/bin/mihomo   || failed+=("还原/移除 mihomo"); }
   # 还原系统级改动(仅全新安装才到这里)。逐项独立判定: 任一项失败都不许挡住后面的还原。
   if [[ -e /etc/nftables.conf.pdg-orig ]]; then
     if cp -a /etc/nftables.conf.pdg-orig /etc/nftables.conf 2>/dev/null; then
@@ -143,7 +160,14 @@ rollback(){
   fi
 }
 # 不在此处 exit: 让 shell 保持触发退出的原始状态码, 回滚的失败不改写最初的安装错误。
-on_exit(){ local rc="$1"; [[ "${INSTALL_OK:-0}" == 1 || "$rc" == 0 ]] && return 0; rollback; }
+on_exit(){
+  local rc="$1"
+  if [[ "${INSTALL_OK:-0}" == 1 || "$rc" == 0 ]]; then
+    rm -f /usr/local/bin/{mosdns,sing-box,mihomo}.pdg-preinstall 2>/dev/null   # 装成了, 原件备份不再需要
+    return 0
+  fi
+  rollback
+}
 trap 'on_exit $?' EXIT
 
 # ── 1. 依赖 ──
@@ -160,6 +184,7 @@ if ! command -v mosdns >/dev/null; then
   curl -fsSL "https://github.com/IrineSistiana/mosdns/releases/download/${MOSDNS_VER}/mosdns-linux-${MARCH}.zip" -o "$t/m.zip"
   pdg_verify_sha256 "$t/m.zip" "${PDG_SHA256[mosdns-$MARCH]:-}" "mosdns $MOSDNS_VER ($MARCH)" \
     || { rm -rf "$t"; die "mosdns 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
+  _stash_bin /usr/local/bin/mosdns
   (cd "$t" && unzip -q m.zip && install -m755 mosdns /usr/local/bin/mosdns)
   MOSDNS_INSTALLED=1
   rm -rf "$t"
@@ -177,6 +202,7 @@ if [[ "$CORE" == mihomo ]]; then
     pdg_verify_sha256 "$t/mihomo.gz" "${PDG_SHA256[mihomo-$MARCH]:-}" "mihomo $MIHOMO_VER ($MARCH)" \
       || { rm -rf "$t"; die "mihomo 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
     gunzip -c "$t/mihomo.gz" > "$t/mihomo"
+    _stash_bin /usr/local/bin/mihomo
     install -m755 "$t/mihomo" /usr/local/bin/mihomo
     MIHOMO_INSTALLED=1
     rm -rf "$t"
@@ -190,6 +216,7 @@ else
     pdg_verify_sha256 "$t/sb.tgz" "${PDG_SHA256[singbox-$MARCH]:-}" "sing-box $SINGBOX_VER ($MARCH)" \
       || { rm -rf "$t"; die "sing-box 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
     tar -xzf "$t/sb.tgz" -C "$t"
+    _stash_bin /usr/local/bin/sing-box
     install -m755 "$t"/sing-box-*/sing-box /usr/local/bin/sing-box
     SINGBOX_INSTALLED=1
     rm -rf "$t"
