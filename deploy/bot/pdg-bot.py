@@ -39,6 +39,7 @@ BACKEND_MARKER = "/etc/privdns-gateway/backend"   # 内容 mihomo / singbox; 读
 PROFILE_ENV = "/etc/privdns-gateway/profile.env"  # 持久化开关(PDG_LOWMEM / PDG_TFO 等)
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 MOSDNS_DIRECT = "/etc/mosdns/rules/custom_direct.txt"
+MOSDNS_HIJACK = "/etc/mosdns/rules/custom_hijack.txt"   # 指到出口的域名: 必须劫持才进得了代理
 RS_META = "/opt/pdg-bot/rulesets.json"
 UPDATE_SCRIPT = "/opt/pdg-bot/update-rules.sh"
 IOS_TMPL = "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"
@@ -1024,6 +1025,20 @@ def _write_direct(domains):
         f.write("# pdg-bot 自定义直连\n" + "".join("domain:" + d + "\n" for d in sorted(set(domains))))
     sh(["systemctl", "restart", "mosdns"])
 
+def _read_hijack():
+    """指到出口的域名劫持表。mosdns 的 hijack_set 只装 geosite 策展分类, 不含任意个人域名 ——
+    不把这些域名劫持到网关, 手机会拿到真实 IP 直连, 内核里的出口规则永远不会被命中。"""
+    if not os.path.exists(MOSDNS_HIJACK):
+        return []
+    return [l.strip().replace("domain:", "") for l in open(MOSDNS_HIJACK)
+            if l.strip() and not l.startswith("#")]
+
+def _write_hijack(domains):
+    with open(MOSDNS_HIJACK, "w") as f:
+        f.write("# pdg-bot 显式出口域名劫持表(指到出口的域名必须由 mosdns 劫持才会进代理)\n"
+                + "".join("domain:" + d + "\n" for d in sorted(set(domains))))
+    sh(["systemctl", "restart", "mosdns"])   # domain_set 只在启动时加载, 必须重启才生效
+
 # ── mosdns DNS 上游 (remote=国际 / local=国内; 用于接 DNS 解锁等自定义解析器) ──
 def _upstreams(which):
     tag = which + "_upstream"
@@ -1996,7 +2011,10 @@ def add_rule(domain, target):
     if not re.match(r"^[a-z0-9.-]+$", domain):
         return False, "域名格式不对"
     if target in ("direct", "直连"):
-        _write_direct(_read_direct() + [domain]); return True, f"已把 {domain} 设为直连"
+        _write_direct(_read_direct() + [domain])
+        if domain in _read_hijack():                 # 改判直连: 必须同时撤掉劫持, 否则仍被劫进代理
+            _write_hijack([d for d in _read_hijack() if d != domain])
+        return True, f"已把 {domain} 设为直连"
     c = load()
     if target not in exit_tags(c):
         return False, f"出口 {target} 不存在; 可选: {', '.join(exit_tags(c))} 或 direct"
@@ -2011,6 +2029,8 @@ def add_rule(domain, target):
         idx = 1 if cc["route"]["rules"] and cc["route"]["rules"][0].get("action") == "reject" else 0
         cc["route"]["rules"].insert(idx, {"domain_suffix": [domain], "outbound": target})
     ok, msg = apply_sb(mod)
+    if ok and domain not in _read_hijack():          # 让 mosdns 把它劫持到网关, 否则这条规则是死的
+        _write_hijack(_read_hijack() + [domain])
     return ok, (f"已把 {domain} → {target}" if ok else msg)
 
 def del_rule(domain):
@@ -2027,6 +2047,8 @@ def del_rule(domain):
                                     or r.get("domain_suffix") or r.get("domain")
                                     or r.get("domain_keyword") or r.get("ip_cidr")]
         apply_sb(mod); removed.append("出口规则")
+        if domain in _read_hijack():
+            _write_hijack([d for d in _read_hijack() if d != domain])
     if domain in _read_direct():
         _write_direct([d for d in _read_direct() if d != domain]); removed.append("直连表")
     return (bool(removed), f"已删除 {domain} ({'+'.join(removed)})" if removed else f"未找到含 {domain} 的规则")
@@ -2062,7 +2084,10 @@ def del_rules_bulk(domains):
         return False, msg
     cur = _read_direct(); hit = [x for x in cur if x in domains]
     if hit:
-        _write_direct([x for x in cur if x not in domains])   # 直连表改 mosdns 文件(与原 del_rule 一致, 不重启 mosdns)
+        _write_direct([x for x in cur if x not in domains])
+    hj = _read_hijack()
+    if any(x in domains for x in hj):
+        _write_hijack([x for x in hj if x not in domains])
     return True, f"✅ 已删除 {len(domains)} 个域名" + (f"(含直连 {len(hit)} 个)" if hit else "")
 
 def del_rule_kb(chat, back=RULE_BACK):
@@ -2358,11 +2383,12 @@ def _ios_profile(ssids=()):
     return plistlib.dumps(p)
 
 # ── 配置备份 / 恢复 ──
-BACKUP_FILES = [SB, MOSDNS_CONF, MOSDNS_DIRECT, RS_META]
+BACKUP_FILES = [SB, MOSDNS_CONF, MOSDNS_DIRECT, MOSDNS_HIJACK, RS_META]
 RESTORE_MAP = {
     "etc/sing-box/config.json": SB,
     "etc/mosdns/config.yaml": MOSDNS_CONF,
     "etc/mosdns/rules/custom_direct.txt": MOSDNS_DIRECT,
+    "etc/mosdns/rules/custom_hijack.txt": MOSDNS_HIJACK,
     "opt/pdg-bot/rulesets.json": RS_META,
 }
 

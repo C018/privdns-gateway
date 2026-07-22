@@ -406,6 +406,7 @@ if [[ "$REPO_DIR" != "/opt/privdns-gateway" ]]; then
   [[ -d /opt/privdns-gateway/.git ]] || { rm -rf /opt/privdns-gateway; cp -a "$REPO_DIR" /opt/privdns-gateway 2>/dev/null || true; }
 fi
 : > /etc/mosdns/rules/custom_direct.txt
+: > /etc/mosdns/rules/custom_hijack.txt   # bot 指到出口的域名(必须被 mosdns 劫持才会进代理)
 : > /etc/mosdns/rules/unlock.txt          # WDA 解锁域名集(空=休眠; bot『🔓 解锁走 WDA』填充)
 : > /etc/mosdns/rules/mitm_hijack.txt     # MITM 接管域名集(空=休眠; iOS 启用 MITM 插件时填充)
 

@@ -139,6 +139,9 @@ jobs:
       - name: "自检防火墙端口回归"
         run: python3 tests/test-doctor-firewall.py
 
+      - name: "分流规则→mosdns 劫持同步回归 (指到出口的域名必须被 mosdns 劫持, 否则规则是死的)"
+        run: python3 tests/test-rule-hijack-sync.py
+
       - name: "CLI/report/bot 杂项回归 (rollback 校验/inet pdg/菜单 exec)"
         run: python3 tests/test-maintenance-polish.py
 

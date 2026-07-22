@@ -66,6 +66,7 @@ mkdir -p "$WORK/rules"
 echo "qq.com" > "$WORK/rules/geosite_cn.txt"
 : > "$WORK/rules/geosite_apple.txt"
 : > "$WORK/rules/custom_direct.txt"
+: > "$WORK/rules/custom_hijack.txt"
 echo "domain:unlktest.example" > "$WORK/rules/unlock.txt"
 echo "example.com" > "$WORK/rules/geosite_geolocation-!cn.txt"   # 劫持集(all 模式=geolocation-!cn): 代理域名在集内 → 被劫持
 : > "$WORK/rules/mitm_hijack.txt"                                # MITM 接管域名(force_hijack): 本测试无, 留空

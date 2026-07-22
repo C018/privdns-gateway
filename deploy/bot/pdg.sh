@@ -1383,12 +1383,65 @@ PY
   return 0
 }
 
+# issue #1: bot 把域名"指到出口"时只改了内核路由, 没让 mosdns 劫持该域名 → 手机拿到真实 IP
+# 直连, 流量根本不到网关, 那条出口规则是死的(用户现场: 加了 ip.skk.moe→jp 仍显示国内直连,
+# 手工塞进 geosite 文件并重启 mosdns 才生效)。老装补: 建用户劫持表 → 并入 hijack_set →
+# 回填已有的显式出口域名 → 有改动才重启 mosdns。幂等。
+migrate_custom_hijack(){
+  local mc=/etc/mosdns/config.yaml hj=/etc/mosdns/rules/custom_hijack.txt sb=/etc/sing-box/config.json out
+  [[ -f "$mc" ]] || return 0
+  install -d -m755 /etc/mosdns/rules 2>/dev/null || true
+  if ! out=$(python3 - "$mc" "$sb" "$hj" <<'MIGPY'
+import json, os, re, sys
+mc, sb, hj = sys.argv[1], sys.argv[2], sys.argv[3]
+changed = False
+
+# 先保证劫持表文件存在, 再改 config —— mosdns 对 domain_set 文件是**强依赖**(缺文件直接
+# FATAL 起不来), 顺序反了万一中途失败就把 mosdns 干趴了。
+doms = set()
+try:
+    c = json.load(open(sb, encoding="utf-8"))
+    for r in c.get("route", {}).get("rules", []):
+        if "outbound" in r and not r.get("rule_set"):
+            doms |= set(r.get("domain_suffix") or []) | set(r.get("domain") or [])
+except Exception:
+    pass
+cur = set()
+if os.path.exists(hj):
+    cur = {l.strip().replace("domain:", "") for l in open(hj, encoding="utf-8")
+           if l.strip() and not l.startswith("#")}
+if not os.path.exists(hj) or (doms - cur):
+    with open(hj, "w", encoding="utf-8") as f:
+        f.write("# pdg-bot 显式出口域名劫持表(指到出口的域名必须由 mosdns 劫持才会进代理)\n")
+        f.writelines("domain:" + d + "\n" for d in sorted(cur | doms))
+    changed = True
+
+s = open(mc, encoding="utf-8").read()
+if hj not in s:                      # 按实际路径判幂等, 不靠硬编码文件名子串
+    m = re.search(r"(- tag: hijack_set\b[\s\S]*?files: \[)([^\]]*)(\])", s)
+    if not m:
+        raise SystemExit("hijack_set 形态不认识")
+    s = s[:m.end(2)] + ',"' + hj + '"' + s[m.end(2):]
+    open(mc, "w", encoding="utf-8").write(s)
+    changed = True
+print("changed" if changed else "nochange")
+MIGPY
+  ); then
+    c_y "  mosdns 用户劫持表迁移失败(hijack_set 形态不认识?), 跳过。"; return 0
+  fi
+  if [[ "$out" == changed ]]; then
+    systemctl restart mosdns 2>/dev/null || true
+    c_g "  已建用户劫持表并回填显式出口域名(修: 指到出口的域名此前不被 mosdns 劫持)。"
+  fi
+}
+
 run_all_migrations(){
   migrate_platform_marker || true          # 先统一平台判定源(后续平台相关迁移据此走)
   migrate_botenv || true; migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true
   migrate_mosdns_unlock || true; migrate_singbox_gms || true; migrate_fw_gms || true
   migrate_mosdns_ratelimit || true; migrate_lowmem || true; migrate_mihomo_safepaths || true
   migrate_deploy_botfiles || true
+  migrate_custom_hijack || true
   migrate_mosdns_mitm || true; migrate_pdg_mitm_service || true
   migrate_android_cleanup || true; migrate_ios_gms_cleanup || true   # 平台隔离清理(各自平台内幂等)
 }
@@ -1520,7 +1573,10 @@ cmd_hijack_mode(){
   local mode="${1:-}" file
   if [[ "$mode" != all && "$mode" != gfw ]]; then
     echo "用法: pdg hijack-mode <all|gfw>"
-    echo "  all = 非CN域名全劫持进代理(默认)"
+    echo "  all = geosite 判为非CN的域名劫持进代理(默认)"
+    echo "        注意: 依据是 geosite 的 geolocation-!cn **策展分类**, 不是\"所有非CN域名\";"
+    echo "        不在任何 geosite 分类里的域名(如个人域名)不会被它劫持 —— 在 bot 里把域名"
+    echo "        指到出口即可, 那会自动写进 custom_hijack.txt 并重启 mosdns。"
     echo "  gfw = 只劫持 GFWList 真被墙域名; 非墙海外域名直连(修 SSH/直连走域名被劫持)。前提: 内网卡 SIM 能直达一般互联网"
     echo "  当前: $(cat /etc/privdns-gateway/profile.env 2>/dev/null | sed -n 's/^PDG_HIJACK_MODE=//p' | tail -1 || echo '?')"
     return 1
