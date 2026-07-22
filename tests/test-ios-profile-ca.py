@@ -16,6 +16,7 @@ bot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bot)
 
 bot.IOS_TMPL = str(ROOT / "deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl")
+bot._platform = lambda: "ios"      # _ios_profile 现要求 iOS 平台(最底层门控)
 bot._dot_host = lambda: "dot.example.com"
 bot._server_ip = lambda: "203.0.113.10"
 

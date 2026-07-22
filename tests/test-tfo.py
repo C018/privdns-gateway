@@ -7,6 +7,8 @@
 """
 import importlib.util as u
 import os
+import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -88,6 +90,34 @@ def main():
     bot._profile_set("PDG_LOWMEM", "1"); bot._profile_set("PDG_TFO", "1"); bot._profile_set("PDG_LOWMEM", "0")
     assert bot._profile_get("PDG_LOWMEM") == "0" and bot._profile_get("PDG_TFO") == "1"
     ok("profile.env upsert 保留其它键(PDG_LOWMEM 与 PDG_TFO 共存)")
+
+    # ── 跨语言回归: 真跑升级 __migrate 路径的 BASH profile.env 写入(pdg.sh 的 pdg_lowmem_resolve),
+    #    证明升级后 PDG_TFO 不丢、_tfo_intent 仍以持久化值为准(无需手动重开) ──
+    mem = os.path.join(tmp, "mem512"); open(mem, "w", encoding="utf-8").write("MemTotal: 512000 kB\n")
+    pdg_sh = (ROOT / "deploy" / "bot" / "pdg.sh").read_text(encoding="utf-8")
+    m = re.search(r"(?sm)^LOWMEM_THRESHOLD_KB=.*?(?=^pdg_fetch_release_tags\(\)\{)", pdg_sh)
+    assert m, "抽取 pdg.sh 低内存段失败"
+    lowmem_section = m.group(0)
+
+    def bash_migrate_profile(pf):
+        """跑升级 __migrate 里真正改写 profile.env 的那一步(pdg_lowmem_resolve, auto)。"""
+        script = "c_g(){ :; }; c_y(){ :; }\n" + lowmem_section + "\npdg_lowmem_resolve\n"
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                           env={**os.environ, "PDG_PROFILE": pf, "PDG_MEMINFO": mem, "PDG_LOWMEM": "auto"})
+        assert r.returncode == 0, r.stderr
+        return open(pf, encoding="utf-8").read()
+
+    no_proxy = {"outbounds": [{"type": "direct", "tag": "jp"}], "route": {}}   # 无代理出口: 只能靠持久化值
+    for tfo_val in ("1", "0"):
+        pf = os.path.join(tmp, f"mig_{tfo_val}.env")
+        open(pf, "w", encoding="utf-8").write(
+            f"PDG_LOWMEM=0\nPDG_HIJACK_MODE=gfw\nPDG_PLATFORM=ios\nPDG_TFO={tfo_val}\nCUSTOM=keep\n")
+        body = bash_migrate_profile(pf)
+        assert f"PDG_TFO={tfo_val}" in body, f"升级 __migrate 后 PDG_TFO 应保留为 {tfo_val}"
+        assert "CUSTOM=keep" in body and "PDG_HIJACK_MODE=gfw" in body, "未知键/其它键应保留"
+        bot.PROFILE_ENV = pf
+        assert bot._tfo_intent(no_proxy) is (tfo_val == "1"), "无代理出口时应以持久化 PDG_TFO 为准"
+        ok(f"升级 __migrate 后 PDG_TFO={tfo_val} 保留 + _tfo_intent 以持久化值为准(无需重开)")
 
     print(f"\n通过 {pass_n} 项断言")
 

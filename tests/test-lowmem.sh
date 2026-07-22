@@ -63,6 +63,11 @@ printf 'PDG_PLATFORM=android\n' > "$WORK/pnew.env"
 PDG_PROFILE="$WORK/pnew.env" bash -c "source '$WORK/harness.sh'; _profile_set PDG_LOWMEM 1"
 grep -qxF 'PDG_PLATFORM=android' "$WORK/pnew.env" && grep -qxF 'PDG_LOWMEM=1' "$WORK/pnew.env" \
   && ok "key 不存在 → 追加且不破坏其它" || bad "追加破坏了其它键"
+# 重复 PDG_LOWMEM → 规范为一个有效值(中间的 PDG_TFO 保留)
+printf 'PDG_LOWMEM=1\nPDG_TFO=1\nPDG_LOWMEM=0\n' > "$WORK/pdup.env"
+PDG_PROFILE="$WORK/pdup.env" bash -c "source '$WORK/harness.sh'; _profile_set PDG_LOWMEM 1"
+{ [[ "$(grep -c '^PDG_LOWMEM=' "$WORK/pdup.env")" == 1 ]] && grep -qxF 'PDG_TFO=1' "$WORK/pdup.env"; } \
+  && ok "重复 PDG_LOWMEM → 规范为一个有效值(PDG_TFO 保留)" || bad "重复未规范/丢 PDG_TFO"
 # 写入失败(目录只读)→ 原 profile 不被破坏(无半截/空文件); 需非 root
 if [[ "$(id -u)" != 0 ]]; then
   mkdir -p "$WORK/rop"; printf 'PDG_LOWMEM=0\nPDG_PLATFORM=android\n' > "$WORK/rop/profile.env"

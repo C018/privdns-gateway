@@ -19,6 +19,18 @@ _pdg_core(){ local b; b=$(cat /etc/privdns-gateway/backend 2>/dev/null); [[ "$b"
 _pdg_core_svc(){ [[ "$(_pdg_core)" == mihomo ]] && echo mihomo || echo sing-box; }
 # 手机平台(ios / android; 读不到默认 android)
 _pdg_platform(){ local p; p=$(cat /etc/privdns-gateway/platform 2>/dev/null); [[ "$p" == ios || "$p" == android ]] && echo "$p" || echo android; }
+# 平台标记是否明确(status/doctor 据此提示"缺失回退")
+_pdg_platform_present(){ local p; p=$(cat /etc/privdns-gateway/platform 2>/dev/null); [[ "$p" == ios || "$p" == android ]]; }
+# 按平台的必需服务集(pdg-probe81 iOS 专属; 与 checks.expected_services 同语义)
+_pdg_svcs(){ local s; s="mosdns $(_pdg_core_svc) pdg-bot"; [[ "$(_pdg_platform)" == ios ]] && s="$s pdg-probe81"; echo "$s"; }
+# iOS: 从已渲染的 nft 移除 GMS 5228-5230(iOS 走 APNs, 不需要)。nft 模板对两平台通用 —— 装机/切核
+# 渲染后在 iOS 上剥掉, 免得 iOS 带上 GMS(或切核后 GMS 复活)。$1=nft 文件; 非 iOS 或文件不存在=空操作。
+_pdg_nft_strip_gms(){
+  local f="$1"
+  [[ "$(_pdg_platform)" == ios && -f "$f" ]] || return 0
+  sed -E -i 's#(tcp dport [{] 53, 80, 81, 443, 853), 5228-5230, 8445 [}] accept#\1, 8445 } accept#' "$f"  # sing-box 端口集
+  sed -E -i 's#(tcp dport [{] 80, 443), 5228-5230 [}] redirect#\1 } redirect#' "$f"                        # mihomo REDIRECT
+}
 
 # 串行化"会写配置/重启服务"的操作(update/rollback/snapshot), 防 bot 更新按钮与命令行并发。
 # 嵌套调用(update→snapshot)只锁一次。read-only 操作(status/doctor/report/log)不加锁。
@@ -63,6 +75,7 @@ _journald_set_key(){
 
 # 原子 upsert: 只更新 profile.env 里的 key=val 这一行, 其余键/注释/未知项原样保留。
 # 语义与 pdg-bot.py 的 _profile_set 一致(去前导空白后以 key= 开头才算命中; #key= 注释不算)。
+# 重复(多行同键)规范为一个有效值(保首个位置, 丢后续); 缺失则追加; 文件不存在则创建。
 # 临时文件 + mv 原子替换: 失败不留半截/空文件。返回非 0 表示写入失败。
 _profile_set(){
   local key="$1" val="$2" tmp found=0 line stripped
@@ -73,7 +86,7 @@ _profile_set(){
       while IFS= read -r line || [[ -n "$line" ]]; do
         stripped="${line#"${line%%[![:space:]]*}"}"
         if [[ "$stripped" == "${key}="* ]]; then
-          printf '%s=%s\n' "$key" "$val"; found=1
+          [[ "$found" == 1 ]] || { printf '%s=%s\n' "$key" "$val"; found=1; }   # 首个→规范值; 后续重复→丢弃
         else
           printf '%s\n' "$line"
         fi
@@ -93,7 +106,8 @@ pdg_lowmem_resolve(){
     *) if [[ "$cur" == 0 || "$cur" == 1 ]]; then res="$cur"
        else mt="$(_mem_total_kb)"; if [[ -n "$mt" && "$mt" -le "$LOWMEM_THRESHOLD_KB" ]]; then res=1; else res=0; fi; fi;;
   esac
-  _profile_set PDG_LOWMEM "$res" || true   # 原子 upsert, 不整覆盖(保留 HIJACK_MODE/PLATFORM/TFO 等)
+  # 原子 upsert, 不整覆盖(保留 HIJACK_MODE/PLATFORM/TFO 等); 告警走 stderr 免污染被捕获的 $res
+  _profile_set PDG_LOWMEM "$res" || c_y "⚠️ profile.env 写入失败(磁盘满/只读?), PDG_LOWMEM 本次未持久化。" >&2
   echo "$res"
 }
 
@@ -191,12 +205,16 @@ pdg_fetch_release_tags(){
 cmd_status(){
   c_g "== 服务 =="
   local core; core="$(_pdg_core)"
-  for s in mosdns "$(_pdg_core_svc)" pdg-bot pdg-probe81; do
+  local s
+  # shellcheck disable=SC2046  # _pdg_svcs 输出有意按空白分词
+  for s in $(_pdg_svcs); do   # 按平台: pdg-probe81 仅 iOS
     printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
+  [[ "$(_pdg_platform)" == ios ]] && printf "  %-12s %s\n" "pdg-mitm" "$(systemctl is-active pdg-mitm 2>/dev/null)"
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  内核后端     $core$([[ "$core" == mihomo ]] && echo "(可更新, 无版本天花板)" || echo "(1.12.x 钉死)")"
-  echo "  手机平台     $(_pdg_platform)"
+  if _pdg_platform_present; then echo "  手机平台     $(_pdg_platform)"
+  else echo "  手机平台     android(⚠️ 平台标记缺失, 按 Android 安全回退; 运行 sudo pdg 触发迁移落定)"; fi
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports p9090="9090(local clash_api)"
   if jq -e '.experimental.clash_api as $c | $c.external_controller == "0.0.0.0:9090" and $c.external_ui == "/etc/sing-box/ui/dist" and (($c.secret // "") | length > 0)' /etc/sing-box/config.json >/dev/null 2>&1; then
@@ -453,6 +471,7 @@ PY
 # shellcheck disable=SC2120  # $1 仅测试注入, 生产调用不传参
 migrate_singbox_gms(){
   local f="${1:-/etc/sing-box/config.json}"
+  [[ "$(_pdg_platform 2>/dev/null)" == ios ]] && return 0     # GMS/FCM 仅 Android; iOS 走 APNs, 不补
   [[ -f "$f" ]] || return 0
   grep -q '"listen_port": 5228' "$f" && return 0              # 已有 → 幂等退出
   grep -q '"sniff_override_destination"' "$f" || return 0     # 不是本项目形态的配置 → 不动
@@ -495,6 +514,7 @@ PY
 # shellcheck disable=SC2120  # $1 仅测试注入, 生产调用不传参
 migrate_fw_gms(){
   local f="${1:-/etc/nftables.conf}"
+  [[ "$(_pdg_platform 2>/dev/null)" == ios ]] && return 0     # GMS/FCM 仅 Android; iOS 不放行 5228-5230
   [[ -f "$f" ]] || return 0
   grep -q 'table inet pdg' "$f" || return 0                   # 未迁到 inet pdg 的先走 migrate_firewall_to_pdg, 下次再补
   grep -qE 'tcp dport [{][^}]*5228' "$f" && return 0          # 已有 → 幂等退出
@@ -805,13 +825,16 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/sb2mihomo.py        /opt/pdg-bot/
-  install -m755 "$REPO_DIR"/deploy/bot/mitm_ca.py          /opt/pdg-bot/ 2>/dev/null || true
-  install -m755 "$REPO_DIR"/deploy/bot/mitm_server.py      /opt/pdg-bot/ 2>/dev/null || true
-  install -m755 "$REPO_DIR"/deploy/bot/mitm_wloc.py        /opt/pdg-bot/ 2>/dev/null || true
-  install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
+  # iOS 专属组件按平台部署: Android 更新不把 iOS 文件装回来(migrate_android_cleanup 亦会清残留)。
+  if [[ "$(_pdg_platform)" == ios ]]; then
+    install -m755 "$REPO_DIR"/deploy/bot/mitm_ca.py          /opt/pdg-bot/ 2>/dev/null || true
+    install -m755 "$REPO_DIR"/deploy/bot/mitm_server.py      /opt/pdg-bot/ 2>/dev/null || true
+    install -m755 "$REPO_DIR"/deploy/bot/mitm_wloc.py        /opt/pdg-bot/ 2>/dev/null || true
+    install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/ 2>/dev/null || true
+    install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl 2>/dev/null || true
+  fi
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
-  install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh   /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh     /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
@@ -871,7 +894,8 @@ cmd_update(){
 
 cmd_token(){ need_root token; pdg-set-token; }   # 不 exec, 设完/取消都回菜单
 
-cmd_restart(){ need_root restart; local svc; svc="$(_pdg_core_svc)"; systemctl restart mosdns "$svc" pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / $svc / pdg-bot / pdg-probe81"; }
+# shellcheck disable=SC2086  # $svcs 是有意按空白分词的服务名列表
+cmd_restart(){ need_root restart; local svcs; svcs="$(_pdg_svcs)"; systemctl restart $svcs 2>/dev/null; echo "已重启: $svcs"; }
 
 cmd_log(){ journalctl -u pdg-bot -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
 
@@ -906,6 +930,8 @@ cmd_detect_cidr(){
 
 cmd_ios(){
   need_root ios
+  # 平台门控: Android 直接拒绝 —— 不装 qrencode、不临时改 nft、不开 8443。
+  [[ "$(_pdg_platform)" == ios ]] || { echo "❌ iOS 描述文件仅 iOS 平台可用(本机为 Android)。Android 请在手机『私密 DNS』直接填 DoT 域名。"; return 1; }
   local TMPL=/opt/pdg-bot/pdg-dot.mobileconfig.tmpl
   [[ -f "$TMPL" ]] || { echo "缺少 $TMPL, 先装好 PrivDNS Gateway"; return 1; }
   command -v qrencode >/dev/null || { c_g "装 qrencode…"; apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qrencode; }
@@ -1010,12 +1036,44 @@ migrate_mihomo_safepaths(){
 # pdg-bot.py 由主安装装成 bot.py, 此处跳过。幂等。
 migrate_deploy_botfiles(){
   [[ -d "$REPO_DIR/deploy/bot" ]] || return 0
-  local f base
+  local f base plat; plat="$(_pdg_platform)"
   for f in "$REPO_DIR"/deploy/bot/*.py; do
     base=$(basename "$f")
     [[ "$base" == "pdg-bot.py" ]] && continue
+    case "$base" in                                   # iOS 专属 MITM 模块: 仅 iOS 装, Android 不装/不复活
+      mitm_ca.py|mitm_server.py|mitm_wloc.py) [[ "$plat" == ios ]] || continue;;
+    esac
     install -m755 "$f" /opt/pdg-bot/ 2>/dev/null || true
   done
+}
+
+# 统一平台判定源: 确保 /etc/privdns-gateway/platform 存在且合法(canonical)。幂等。
+# 缺失/非法时按证据回退: profile.env 的 PDG_PLATFORM → 明确 iOS 证据(pdg-mitm unit / WLOC 配置) → android。
+# 仍无法确定=android, 但 status/doctor 会另行提示"标记缺失回退"(见 _pdg_platform_present / check_platform)。
+migrate_platform_marker(){
+  # 路径可用 env 覆盖(供测试注入), 生产用默认 /etc/privdns-gateway/*。
+  local pf="${PDG_PLATFORM_FILE:-/etc/privdns-gateway/platform}"
+  local prof="${PROFILE_ENV:-/etc/privdns-gateway/profile.env}"
+  local mj="${PDG_MITM_JSON:-/etc/privdns-gateway/mitm.json}"
+  local mu="${PDG_MITM_UNIT:-/etc/systemd/system/pdg-mitm.service}"
+  local cur; cur="$(cat "$pf" 2>/dev/null)"
+  [[ "$cur" == ios || "$cur" == android ]] && return 0        # 已合法 → 幂等
+  local plat=""
+  # 1) profile.env 的 PDG_PLATFORM
+  if [[ -f "$prof" ]]; then
+    local pp; pp="$(sed -n 's/^PDG_PLATFORM=//p' "$prof" | tail -1)"
+    [[ "$pp" == ios || "$pp" == android ]] && plat="$pp"
+  fi
+  # 2) 明确 iOS 证据: 已装 pdg-mitm unit 或存在 WLOC 配置(启用过接管)
+  if [[ -z "$plat" ]]; then
+    if [[ -f "$mu" ]] || grep -q '"wloc"' "$mj" 2>/dev/null; then plat=ios; fi
+  fi
+  # 3) 仍无法确定 → 安全回退 android(不写死"已确认", status/doctor 会提示标记缺失回退)
+  [[ -n "$plat" ]] || plat=android
+  mkdir -p "$(dirname "$pf")" 2>/dev/null || true
+  local t; t="$(mktemp "$(dirname "$pf")/.platform.XXXXXX" 2>/dev/null)" || return 0
+  printf '%s\n' "$plat" > "$t" && mv -f "$t" "$pf" \
+    && c_g "补平台标记: $plat(据现有证据)。" || rm -f "$t" 2>/dev/null
 }
 
 # 老装(v1.4.x, WLOC 之前)迁移: 给 mosdns 补 MITM 接管结构 —— force_hijack domain_set +
@@ -1103,12 +1161,88 @@ migrate_pdg_mitm_service(){
   c_g "  ✅ 已补 iOS pdg-mitm 服务(MITM 插件宿主)。"
 }
 
+# 老装迁移(Android): 清理误装/残留的 iOS 专属组件。幂等; 仅匹配本项目精确路径/unit, 不误删用户文件。
+# CA / WLOC 地点数据不永久删 —— 留作休眠(Android 上 _mitm_enabled_domains 恒空, 本就不生效)。
+migrate_android_cleanup(){
+  [[ "$(_pdg_platform)" == android ]] || return 0
+  # 有启用中的 WLOC → 先安全休眠: 清运行时接管 + enabled=false(保留地点/CA 数据)
+  if grep -q '"enabled": *true' /etc/privdns-gateway/mitm.json 2>/dev/null; then
+    : > /etc/mosdns/rules/mitm_hijack.txt 2>/dev/null || true
+    python3 - /etc/privdns-gateway/mitm.json <<'PY' 2>/dev/null || true
+import json, sys
+f = sys.argv[1]; c = json.load(open(f))
+if isinstance(c.get("wloc"), dict): c["wloc"]["enabled"] = False
+json.dump(c, open(f, "w"), ensure_ascii=False, indent=2)
+PY
+    systemctl restart mosdns 2>/dev/null || true
+  fi
+  local removed=0 u f
+  for u in pdg-probe81 pdg-mitm; do
+    if [[ -f /etc/systemd/system/$u.service ]]; then
+      systemctl disable --now "$u" 2>/dev/null; rm -f "/etc/systemd/system/$u.service"; removed=1
+    fi
+  done
+  for f in /opt/pdg-bot/probe81.py /opt/pdg-bot/mitm_ca.py /opt/pdg-bot/mitm_server.py /opt/pdg-bot/mitm_wloc.py \
+           /opt/pdg-bot/pdg-dot.mobileconfig.tmpl /opt/pdg-bot/pdg-mitm.mobileconfig.tmpl; do
+    [[ -f "$f" ]] && { rm -f "$f"; removed=1; }
+  done
+  [[ "$removed" == 1 ]] && { systemctl daemon-reload 2>/dev/null || true
+    c_g "Android: 已清理 iOS 专属残留(pdg-probe81/pdg-mitm 服务 + mitm 模块 + 描述文件模板; CA/地点数据保留为休眠)。"; }
+  return 0
+}
+
+# 老装迁移(iOS): 精确、幂等清除本项目误装的 GMS 5228-5230(iOS 走 APNs, 不需要)。
+# 只删 tag=in-gms-5228/5229/5230 的入站 + 从原装端口集/ mihomo REDIRECT 移除 5228-5230。
+# 改前备份, sing-box/nft 均校验, 失败自动还原; 自定义配置不动。$1/$2 供测试注入。
+# shellcheck disable=SC2120
+migrate_ios_gms_cleanup(){
+  [[ "$(_pdg_platform)" == ios ]] || return 0
+  local sb="${1:-/etc/sing-box/config.json}" nf="${2:-/etc/nftables.conf}"
+  # 1) sing-box canonical model: 删 in-gms-* 入站
+  if [[ -f "$sb" ]] && grep -q '"in-gms-5228"' "$sb" && command -v sing-box >/dev/null 2>&1; then
+    local bak; bak="$sb.preiosgms.$(date +%s)"
+    if cp -a "$sb" "$bak" 2>/dev/null && cmp -s "$sb" "$bak"; then
+      if python3 - "$sb" <<'PY'
+import json, sys
+f = sys.argv[1]; c = json.load(open(f))
+c["inbounds"] = [i for i in c.get("inbounds", []) if i.get("tag") not in ("in-gms-5228", "in-gms-5229", "in-gms-5230")]
+json.dump(c, open(f, "w"), ensure_ascii=False, indent=2)
+PY
+      then
+        if sing-box check -c "$sb" >/dev/null 2>&1; then
+          systemctl restart "$(_pdg_core_svc)" 2>/dev/null; sleep 1
+          if [[ "$(systemctl is-active "$(_pdg_core_svc)" 2>/dev/null)" == active ]]; then
+            rm -f "$bak"; c_g "  iOS: 已移除 sing-box GMS 入站(in-gms-5228/5229/5230)。"
+          else c_y "  内核重启失败 → 还原。"; cp -a "$bak" "$sb"; systemctl restart "$(_pdg_core_svc)" 2>/dev/null; fi
+        else c_y "  sing-box check 失败 → 还原。"; cp -a "$bak" "$sb"; fi
+      else c_y "  生成失败 → 还原。"; cp -a "$bak" "$sb"; fi
+    else rm -f "$bak" 2>/dev/null; fi
+  fi
+  # 2) nft: 移除 5228-5230(原装端口集形态)+ mihomo REDIRECT 形态
+  if [[ -f "$nf" ]] && grep -qE '5228' "$nf"; then
+    local bak; bak="$nf.preiosgms.$(date +%s)"
+    if cp -a "$nf" "$bak" 2>/dev/null; then
+      sed -E -i 's#(tcp dport [{] 53, 80, 81, 443, 853), 5228-5230, 8445 [}] accept#\1, 8445 } accept#' "$nf"
+      sed -i -E '/(5228|5229|5230).*redirect|redirect.*(5228|5229|5230)/d' "$nf"   # mihomo REDIRECT 行
+      if grep -qE '5228' "$nf"; then
+        : # 仍有 5228(自定义形态)→ 不强改, 已在上面尽力; 交 doctor
+      fi
+      if nft -c -f "$nf" >/dev/null 2>&1; then
+        nft -f "$nf" 2>/dev/null || true; rm -f "$bak"; c_g "  iOS: 已从防火墙移除 GMS 5228-5230。"
+      else c_y "  nft 校验失败 → 还原。"; cp -a "$bak" "$nf"; nft -f "$nf" 2>/dev/null || true; fi
+    fi
+  fi
+  return 0
+}
+
 run_all_migrations(){
+  migrate_platform_marker || true          # 先统一平台判定源(后续平台相关迁移据此走)
   migrate_botenv || true; migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true
   migrate_mosdns_unlock || true; migrate_singbox_gms || true; migrate_fw_gms || true
   migrate_mosdns_ratelimit || true; migrate_lowmem || true; migrate_mihomo_safepaths || true
   migrate_deploy_botfiles || true
   migrate_mosdns_mitm || true; migrate_pdg_mitm_service || true
+  migrate_android_cleanup || true; migrate_ios_gms_cleanup || true   # 平台隔离清理(各自平台内幂等)
 }
 
 # 内核切换: sing-box <-> mihomo。出口/分流/证书/DoT/mosdns 全不动(model 共用), 只换内核二进制 +
@@ -1121,6 +1255,7 @@ _switchcore_nft(){   # $1=target 渲染并应用对应内核的 nft(用当前 SS
   [[ "$target" == mihomo ]] && tmpl=nftables-mihomo.conf || tmpl=nftables.conf
   [[ -f "$REPO_DIR/deploy/firewall/$tmpl" ]] || { echo "缺 $tmpl(先 pdg update)"; return 1; }
   sed -e "s|__SSH_PORT__|$sshp|g" -e "s|__INTERNAL_CIDR__|$icidr|g" "$REPO_DIR/deploy/firewall/$tmpl" > /etc/nftables.conf
+  _pdg_nft_strip_gms /etc/nftables.conf   # iOS: 切核渲染后剥掉 GMS 5228-5230(不让 iOS 切核复活 GMS)
   nft -f /etc/nftables.conf
 }
 

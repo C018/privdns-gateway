@@ -219,10 +219,15 @@ def _nav(key):
             [{"text": "✏️ 改出口", "callback_data": "edit_rule"}, {"text": "📚 加规则集", "callback_data": "add_rs"},
              {"text": "🗑 删规则集", "callback_data": "del_rs"}],
             [{"text": "✏️ 改规则集名", "callback_data": "edit_rs"}, {"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
-        "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\niOS 点下方生成描述文件:", [
+        # 客户端接入按平台分岔: Android 只给私密DNS 主机名; iOS 只给描述文件按钮。公共项(DoT 域名 / TG 出口)两平台都留。
+        "client": ((f"📱 <b>客户端接入(iOS)</b>\niOS 点下方生成描述文件(DoT 域名 <code>{_dot_host()}</code>):", [
             [{"text": "📱 iOS 描述文件", "callback_data": "ios"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
-            [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]]),
+            [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]])
+            if _platform() == "ios" else
+            (f"📱 <b>客户端接入(Android)</b>\nAndroid 私密 DNS 填: <code>{_dot_host()}</code>", [
+            [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
+            [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]])),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
             [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
             [{"text": "💾 备份", "callback_data": "backup"}, {"text": "♻️ 恢复", "callback_data": "restore"}],
@@ -369,6 +374,19 @@ def _platform():
         pass
     return "android"
 
+def _ios_only(chat, mid=None):
+    """iOS 专属功能的**后端硬门控**(不只隐藏按钮 —— 旧 TG 消息里的按钮/命令被点也会被拒)。
+    iOS → True; 否则清 state + 回一条拒绝消息, 返回 False。callback 传 mid, 文本/命令不传。"""
+    if _platform() == "ios":
+        return True
+    state.pop(chat, None)
+    msg = "此功能仅 iOS 平台可用(本机为 Android)。"
+    if mid is not None:
+        edit(chat, mid, msg, MENU)
+    else:
+        send_plain(chat, msg)
+    return False
+
 def _panel_render_args(model):
     """把 model 的 experimental.clash_api(面板状态)透传给渲染器 —— mihomo 原生 clash API,
     面板开关/secret/external_ui 语义与 sing-box 一致, 无需另建状态。"""
@@ -444,6 +462,10 @@ def _save_mitm_config(cfg):
     os.replace(t, MITM_CONFIG)
 
 def _mitm_enabled_domains():
+    # 平台门控最终入口: 非 iOS 一律视为无接管域名 —— 即便 Android 上有残留 mitm.json,
+    # 也不会推导出任何接管域名(渲染器/劫持写入/pdg-mitm 都据此判空, 不动核心 MITM 路由)。
+    if _platform() != "ios":
+        return []
     cfg = _mitm_config()
     doms = []
     for name, dl in MITM_PLUGIN_DOMAINS.items():
@@ -491,6 +513,8 @@ def _mitm_transact(new_wloc):
     顺序: 备份旧 mitm.json+hijack → 写新 mitm.json → CA(有域名)→ 写 hijack → 渲染内核+校验+稳定active
           → pdg-mitm 稳定active(有域名)/停(无) → mosdns 重启+稳定active。
     保证: 绝不『返回失败但新态(含 enabled)已持久化』, 也绝不『服务失败却返回成功』。返回 (ok, msg)。"""
+    if _platform() != "ios":         # 平台硬门控: Android 不生成 CA / 不写 hijack / 不重启 pdg-mitm / 不改核心 MITM 路由
+        return False, "MITM/WLOC 仅 iOS 平台可用。"
     with _cfg_guard() as got:
         if not got:
             return False, BUSY_MSG
@@ -582,6 +606,8 @@ def wloc_add(name, lat, lon):
     return True, f"✅ 已添加地点 <b>{name}</b>({lat}, {lon})。到「📍 地点/切换」点它即切换。"
 
 def wloc_del(name):
+    if _platform() != "ios":
+        return False, "位置改写(WLOC)仅 iOS 平台可用。"
     w = _wloc_state()
     if not any(l["name"] == name for l in w["locations"]):
         return False, "没有这个地点"
@@ -595,6 +621,8 @@ def wloc_del(name):
 
 def wloc_switch(name):
     """切换激活地点(启用中则热重载坐标)。"""
+    if _platform() != "ios":
+        return False, "位置改写(WLOC)仅 iOS 平台可用。"
     w = _wloc_state()
     if not any(l["name"] == name for l in w["locations"]):
         return False, "没有这个地点"
@@ -647,9 +675,11 @@ def _render_mihomo_file():
     """从当前 model(SB)渲染出 mihomo 配置并落盘。返回渲染 meta(dropped/unknown)。"""
     import sb2mihomo
     model = load()
+    # iOS: 嗅探端口不含 GMS 5228-5230(iOS 走 APNs); Android 用默认(含 GMS)。两平台 canonical/内核均无 GMS 残留。
+    tls_ports = [443] if _platform() == "ios" else None
     cfg, meta = sb2mihomo.singbox_to_mihomo(
         model, redir_port=MIHOMO_REDIR, rulesets=_mihomo_rulesets(),
-        mitm_domains=_mitm_domains(), mitm_port=MITM_PORT, **_panel_render_args(model))
+        mitm_domains=_mitm_domains(), mitm_port=MITM_PORT, tls_ports=tls_ports, **_panel_render_args(model))
     _write_mihomo(cfg)
     return meta
 
@@ -2275,10 +2305,12 @@ def set_dot_domain(domain):
     sh(["systemctl", "restart", "mosdns"])
     global _DOT_HOST
     _DOT_HOST = None  # 让 _dot_host() 重新读新证书 CN
+    _renew = ("• iOS: 重新生成一次「📱 iOS 描述文件」即可(自动用新域名)" if _platform() == "ios"
+              else "• Android: 私密 DNS 改成上面的新域名即可")
     return True, (f"✅ DoT 域名已设为 <b>{domain}</b>\n"
                   f"• 手机私密 DNS 改成: <code>{domain}</code>\n"
                   "• 证书已签发, certbot.timer 自动续期\n"
-                  "• iOS: 重新生成一次「📱 iOS 描述文件」即可(自动用新域名)")
+                  + _renew)
 
 # ── iOS 描述文件 ──
 def _mitm_ca_der():
@@ -2298,6 +2330,8 @@ def _ios_profile(ssids=(), with_ca=False):
     再开 WLOC —— 普通描述文件**默认不带 CA**(不再随 WLOC 开启态偷偷带上)。
     CA 生成/读取失败时**抛错**, 绝不静默产出无 CA 的『成功』描述文件。
     用 plistlib 插入, SSID 含 &<> 等也不会破 XML。"""
+    if _platform() != "ios":         # 最底层门控: 即便某路径绕过按钮/回调, 也生成不了 iOS 描述文件
+        raise RuntimeError("iOS 描述文件仅 iOS 平台可用(本机为 Android)。")
     if not os.path.exists(IOS_TMPL):
         raise FileNotFoundError("缺少模板 " + IOS_TMPL)
     t = open(IOS_TMPL).read()
@@ -2514,7 +2548,7 @@ def status_text():
             f"{dot('mosdns')} mosdns（DNS 分流, 带缓存）\n"
             f"{dot(svc)} {svc}（流量出口）\n"
             f"{dot('pdg-bot')} pdg-bot（管理）\n\n"
-            f"📡 DoT: <code>{_dot_host()}:853</code>（Android 私密DNS / iOS 描述文件）\n"
+            f"📡 DoT: <code>{_dot_host()}:853</code>（{'iOS 描述文件' if _platform() == 'ios' else 'Android 私密 DNS'}）\n"
             f"🌐 IP: <code>{_server_ip()}</code>\n"
             f"📤 出口({len(exits)}): {', '.join(exits)}\n"
             + (g + "\n" if g else "")
@@ -2565,6 +2599,10 @@ def kb_pick_named(prefix, items, back=BACK):
 
 # ── 回调 (原地编辑) ──
 def handle_cb(chat, mid, data):
+    # iOS 专属功能的统一后端门控(不只隐藏按钮): 旧 TG 消息里的 iOS 描述文件 / WLOC 按钮被点也拒绝。
+    if (data in ("ios", "iosgen", "iosgenca") or data == "wloc" or data.startswith("wloc:")) \
+       and not _ios_only(chat, mid):
+        return
     if data in ("menu", "status") or data.startswith("nav:"):
         state.pop(chat, None); del_sel.pop(chat, None)   # 返回/切页 = 放弃进行中的输入流程和勾选, 免得下一条文字被旧状态误吃
     if data in ("menu", "status"):
@@ -2968,6 +3006,8 @@ def handle_text(chat, text, mid=None):
             m = _rs_meta()
             send(chat, "选择删除的规则集：" if m else "无规则集", kb_pick("delrs", list(m.keys())) if m else BACK); return
         if cmd == "/ios":
+            if not _ios_only(chat):
+                return
             try:
                 send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")
             except Exception as e:  # noqa: BLE001
@@ -3048,6 +3088,8 @@ def handle_text(chat, text, mid=None):
         ok, msg = set_ruleset_label(name, "" if text.strip() == "-" else text)
         send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act == "ios_ssid":
+        if _platform() != "ios":         # 已清 state(act 用 pop 取出); Android 直接拒绝, 不生成文件
+            send_plain(chat, "此功能仅 iOS 平台可用(本机为 Android)。"); return
         ssids = [] if text.strip() == "-" else [l.strip()[:32] for l in text.splitlines() if l.strip()][:8]
         try:
             send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(ssids),

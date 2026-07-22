@@ -89,10 +89,16 @@ def main():
     parts = [f"PrivDNS Gateway 诊断报告 ({mode})\n生成: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n"
              f"主机: {run(['hostname'])}"]
     parts.append(section("自检 doctor --json", run(["python3", "/opt/pdg-bot/doctor.py", "--json"])))
+    # 服务列表按平台一致: iOS 才列 pdg-probe81/pdg-mitm(Android 不含); 内核按当前后端。
+    if checks is not None:
+        _svcs = list(checks.expected_services())
+        if checks._platform() == "ios":
+            _svcs.append("pdg-mitm")
+    else:
+        _svcs = ["mosdns", "sing-box", "pdg-bot"]
+    _svcs += ["pdg-rules-update.timer", "pdg-health.timer", "vnstat"]
     parts.append(section("服务状态", "\n".join(
-        f"  {s:<14}{run(['systemctl', 'is-active', s])}"
-        for s in ("mosdns", "sing-box", "pdg-bot", "pdg-probe81",
-                  "pdg-rules-update.timer", "pdg-health.timer", "vnstat"))))
+        f"  {s:<14}{run(['systemctl', 'is-active', s])}" for s in _svcs)))
     parts.append(section("sing-box 版本", run(["sing-box", "version"])))
     parts.append(section("监听端口 (ss -lntu)", run(["ss", "-lntu"])))
     parts.append(section("证书 (CN / 有效期)",

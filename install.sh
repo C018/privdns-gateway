@@ -212,6 +212,11 @@ fi
 # 手机平台: ios | android。一台网关服务一个内网卡手机号, 故平台是每台装机的固定属性。
 # 决定客户端下发方式(iOS 描述文件 / 安卓私密DNS)+ 是否提供 iOS 专属功能(如 MITM 插件, 安卓需 root 故不提供)。
 PLATFORM="${PDG_PLATFORM:-}"
+# 覆盖重装(PDG_FORCE_REINSTALL)未显式传 PDG_PLATFORM 时: 优先沿用已有平台标记 —— 不能默认把 iOS 改成 Android。
+if [[ -z "$PLATFORM" ]]; then
+  _ep="$(cat /etc/privdns-gateway/platform 2>/dev/null)"
+  [[ "$_ep" == ios || "$_ep" == android ]] && { PLATFORM="$_ep"; c_g "沿用已有平台标记: $PLATFORM"; }
+fi
 if [[ -z "$PLATFORM" ]]; then
   if [[ -n "$NONINT" ]]; then PLATFORM="android"
   else
@@ -248,11 +253,14 @@ install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/sb2mihomo.py        /opt/pdg-bot/
-install -m755 "$REPO_DIR"/deploy/bot/mitm_ca.py          /opt/pdg-bot/
-install -m755 "$REPO_DIR"/deploy/bot/mitm_server.py      /opt/pdg-bot/
-install -m755 "$REPO_DIR"/deploy/bot/mitm_wloc.py        /opt/pdg-bot/
-install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
-install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
+# iOS 专属组件(MITM 模块 / :81 探测 / 描述文件模板)只在 iOS 平台安装; Android 不装。
+if [[ "$PLATFORM" == ios ]]; then
+  install -m755 "$REPO_DIR"/deploy/bot/mitm_ca.py          /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/mitm_server.py      /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/mitm_wloc.py        /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
+  install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
+fi
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh   /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh       /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
@@ -287,7 +295,13 @@ esac
 [[ "$HIJACK_MODE" == gfw ]] && HIJACK_SET_FILE="geosite_gfw.txt" || HIJACK_SET_FILE="geosite_geolocation-!cn.txt"
 
 install -d -m700 /etc/privdns-gateway
-printf 'PDG_LOWMEM=%s\nPDG_HIJACK_MODE=%s\nPDG_PLATFORM=%s\n' "$LOWMEM" "$HIJACK_MODE" "$PLATFORM" > /etc/privdns-gateway/profile.env
+# 写本次管理的三个键; 在已有安装上覆盖重装时(与上面读回 PDG_LOWMEM/PDG_HIJACK_MODE 的意图一致),
+# 保留 profile.env 里其余键 —— 尤其 PDG_TFO(bot 持久化的 TFO 意图)与未知/自定义键, 不被重装清掉。
+{
+  printf 'PDG_LOWMEM=%s\nPDG_HIJACK_MODE=%s\nPDG_PLATFORM=%s\n' "$LOWMEM" "$HIJACK_MODE" "$PLATFORM"
+  [[ -f /etc/privdns-gateway/profile.env ]] && \
+    grep -vE '^[[:space:]]*(PDG_LOWMEM|PDG_HIJACK_MODE|PDG_PLATFORM)=' /etc/privdns-gateway/profile.env
+} > /etc/privdns-gateway/profile.env.new && mv -f /etc/privdns-gateway/profile.env.new /etc/privdns-gateway/profile.env
 printf '%s\n' "$PLATFORM" > /etc/privdns-gateway/platform
 
 render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNAL_CIDR|g" \
@@ -297,6 +311,15 @@ render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNA
 
 render "$REPO_DIR/deploy/mosdns/config.yaml"          > /etc/mosdns/config.yaml
 render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json   # 始终是 bot 的数据模型(mihomo 模式下也由它渲染)
+# iOS: 模板含 GMS(in-gms-5228/5229/5230)入站, iOS 走 APNs 不需要 → 删掉, 让 canonical model 从一开始就无 GMS。
+if [[ "$PLATFORM" == ios ]]; then
+  python3 - /etc/sing-box/config.json <<'PY'
+import json, sys
+f = sys.argv[1]; c = json.load(open(f))
+c["inbounds"] = [i for i in c.get("inbounds", []) if i.get("tag") not in ("in-gms-5228", "in-gms-5229", "in-gms-5230")]
+json.dump(c, open(f, "w"), ensure_ascii=False, indent=2)
+PY
+fi
 chmod 700 /etc/sing-box; chmod 600 /etc/sing-box/config.json   # config 含出口密码/uuid
 [[ -e /etc/nftables.conf.pdg-orig ]] || cp -a /etc/nftables.conf /etc/nftables.conf.pdg-orig 2>/dev/null || true  # 供 uninstall 还原
 # 内核后端: 标记 + 防火墙模板(mihomo 用 REDIRECT 入站变体)+ 初始渲染 mihomo 配置
@@ -317,6 +340,11 @@ PY
 else
   render "$REPO_DIR/deploy/firewall/nftables.conf"      > /etc/nftables.conf
 fi
+# iOS: 防火墙模板对两平台通用, 但 iOS 走 APNs 不需要 GMS 5228-5230 → 渲染后剥掉(sing-box 端口集 + mihomo REDIRECT)。
+if [[ "$PLATFORM" == ios ]]; then
+  sed -E -i 's#(tcp dport [{] 53, 80, 81, 443, 853), 5228-5230, 8445 [}] accept#\1, 8445 } accept#' /etc/nftables.conf
+  sed -E -i 's#(tcp dport [{] 80, 443), 5228-5230 [}] redirect#\1 } redirect#' /etc/nftables.conf
+fi
 render "$REPO_DIR/deploy/bot/pdg-bot.service"         > /etc/systemd/system/pdg-bot.service
 chmod 644 /etc/systemd/system/pdg-bot.service        # 不再含 token (token 在 bot.env)
 
@@ -328,7 +356,8 @@ install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.service /etc/systemd/syste
 install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.timer   /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service       /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer         /etc/systemd/system/
-install -m644 "$REPO_DIR"/deploy/ios/pdg-probe81.service      /etc/systemd/system/
+# pdg-probe81(:81 探测)是 iOS 专属, 仅 iOS 装 unit; Android 不装、不起、不开 81。
+[[ "$PLATFORM" == ios ]] && install -m644 "$REPO_DIR"/deploy/ios/pdg-probe81.service /etc/systemd/system/
 render "$REPO_DIR/deploy/firewall/journald-50-pdg.conf" > /etc/systemd/journald.conf.d/50-pdg.conf; chmod 644 /etc/systemd/journald.conf.d/50-pdg.conf
 
 cat > /etc/systemd/system/mosdns.service <<'EOF'
@@ -391,8 +420,10 @@ fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-systemctl enable --now mosdns "$CORE_SVC" pdg-probe81 >/dev/null 2>&1 || true
-[[ "$PLATFORM" == ios ]] && { systemctl enable --now pdg-mitm >/dev/null 2>&1 || true; }
+systemctl enable --now mosdns "$CORE_SVC" >/dev/null 2>&1 || true
+# pdg-probe81 / pdg-mitm 仅 iOS: Android 不启 :81 探测、不起 MITM 服务。
+[[ "$PLATFORM" == ios ]] && { systemctl enable --now pdg-probe81 >/dev/null 2>&1 || true
+                             systemctl enable --now pdg-mitm >/dev/null 2>&1 || true; }
 systemctl enable --now pdg-rules-update.timer >/dev/null 2>&1 || true
 systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true
 if [[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" ]]; then
@@ -411,10 +442,12 @@ nft -f /etc/nftables.conf
 # systemd 默认 Type=simple, `systemctl start` 返 0 只代表 exec 成功, 进程可能随即崩溃。
 # 单看一次 active 有竞态(起来又崩) → 要求连续 3 次保持 active 才算稳(flapping 的 failed/activating 会打断)。
 c_g "校验核心服务(需连续保持 active, 防起来又崩)…"
+# 按平台的必需服务: pdg-probe81 仅 iOS(Android 不装/不起, 不纳入门槛, 否则 Android 装机误判失败回滚)。
+PLAT_SVCS=(mosdns "$CORE_SVC"); [[ "$PLATFORM" == ios ]] && PLAT_SVCS+=(pdg-probe81)
 svc_ok=0; streak=0
 for _ in $(seq 1 20); do
   allact=1
-  for s in mosdns "$CORE_SVC" pdg-probe81; do
+  for s in "${PLAT_SVCS[@]}"; do
     [[ "$(systemctl is-active "$s" 2>/dev/null)" == active ]] || allact=0
   done
   if [[ "$allact" == 1 ]]; then streak=$((streak+1)); else streak=0; fi
@@ -422,15 +455,15 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 if [[ "$svc_ok" != 1 ]]; then
-  for s in mosdns "$CORE_SVC" pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
+  for s in "${PLAT_SVCS[@]}"; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
   journalctl -u mosdns -u "$CORE_SVC" -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
   die "核心服务未能持续保持运行(见上日志)。"   # → 触发回滚
 fi
 INSTALL_OK=1   # 提交点: 核心服务已确认稳定 active, 后面只是打印, 不再回滚
 
 # ── 10. 自检 ──
-echo; c_g "安装完成。状态:"
-for s in mosdns "$CORE_SVC" pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
+echo; c_g "安装完成($PLATFORM 平台)。状态:"
+for s in mosdns "$CORE_SVC" pdg-bot "${PLAT_SVCS[@]:2}"; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
   echo; c_y "⚠️ 管理 bot 未启用(没填 token)。出口和分流规则都在 bot 里设——"
   c_y "   现在还没法配代理。先跑:  sudo pdg-set-token  设好 token, 再给 bot 发 /start。"

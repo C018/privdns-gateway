@@ -85,6 +85,9 @@ jobs:
       - name: "switch-core 内核切换纪律回归 (假 systemctl+重启模拟: 只起一个内核/跨核回滚/unit 无漂移)"
         run: bash tests/test-switch-core.sh
 
+      - name: "平台隔离安装/迁移矩阵 (marker 证据回退/GMS 仅安卓/iOS GMS 清理/服务集按平台)"
+        run: bash tests/test-platform-install.sh
+
       - name: "GMS 推送端口迁移回归 (fw/sing-box 补 5228-5230, 自定义跳过, 失败回滚)"
         run: bash tests/test-gms-migration.sh
 
@@ -159,6 +162,9 @@ jobs:
 
       - name: "WLOC 事务化回归 (BUSY/CA/内核/pdg-mitm/mosdns 故障注入均回滚, 不留 enabled=true)"
         run: python3 tests/test-mitm-wloc-txn.py
+
+      - name: "平台隔离回归 (Android 无 iOS 按钮/回调/后端; iOS 原功能; checks 平台一致)"
+        run: python3 tests/test-platform-isolation.py
 
   functional:
     # 真功能测试: 下载钉死 SHA256 的 sing-box / mosdns, 真起一遍, 验证两层核心链路。

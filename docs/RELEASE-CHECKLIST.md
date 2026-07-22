@@ -19,9 +19,12 @@ PDG_NONINTERACTIVE=1 PDG_SERVER_IP=<公网IP> PDG_INTERNAL_CIDR=172.22.0.0/16 \
 至少跑 **mihomo+iOS** 和 **singbox+Android** 两组。装完:
 
 - [ ] `pdg doctor` 全绿(无 🔴/🟡)。
-- [ ] 服务全 active:`systemctl is-active mosdns pdg-bot pdg-probe81` +(内核)`mihomo` 或 `sing-box` +(iOS)`pdg-mitm`。
-- [ ] **bot 模块都部署了**:`ls /opt/pdg-bot/{sb2mihomo,mitm_ca,mitm_server,mitm_wloc}.py`(缺任何一个 = install 列表漏了)。
-- [ ] 平台门控对:**iOS** doctor 有「MITM 插件」无「GMS 推送」;**Android** 反之。
+- [ ] 服务全 active:`systemctl is-active mosdns pdg-bot`(iOS 追加 `pdg-probe81` `pdg-mitm`)+(内核)`mihomo` 或 `sing-box`。**Android 上 `pdg-probe81`/`pdg-mitm` 应不存在**(`systemctl is-enabled` 报 not-found),81/7894 不监听。
+- [ ] **平台专属模块只在对应平台**:iOS `ls /opt/pdg-bot/{mitm_ca,mitm_server,mitm_wloc}.py` 齐; **Android 这三个 + `probe81.py` + 描述文件模板都不应存在**。`sb2mihomo.py` 两平台都在。
+- [ ] 平台门控对:**iOS** doctor 有「MITM 插件」「MITM结构」「平台=ios」无「GMS 推送」「iOS 探测」缺失;**Android** 反之(有 GMS、无 MITM/probe81)。
+- [ ] **平台隔离(硬门控)**:**Android** bot「📱 客户端」无「iOS 描述文件」按钮;点旧消息里的 iOS/WLOC 按钮被拒;`sudo pdg ios` 友好拒绝(不装 qrencode、不开 8443)。**iOS** 有描述文件/WLOC。
+- [ ] **iOS 无 GMS 残留**:`grep -c in-gms /etc/sing-box/config.json` = 0;`nft list ruleset | grep 5228` 无;两内核都如此。
+- [ ] **平台标记**:`cat /etc/privdns-gateway/platform` 为 ios/android;缺失时 `pdg status`/doctor 明确提示「按 Android 回退」而非静默。
 
 ## ② 从上一个发布版升级(最容易翻车)
 

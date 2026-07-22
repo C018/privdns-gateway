@@ -81,9 +81,28 @@ def _dot_file():
     except Exception:  # noqa: BLE001
         return ""
 
-def check_services():
+def check_platform():
+    """平台标记(/etc/privdns-gateway/platform)是否明确。缺失/非法 → warn: 当前按 Android 安全回退,
+    但这不是已确认的 Android; 跑一次 sudo pdg(触发 migrate_platform_marker)即可落定。"""
+    try:
+        p = open("/etc/privdns-gateway/platform", encoding="utf-8").read().strip()
+    except OSError:
+        p = ""
+    if p in ("ios", "android"):
+        return ("ok", "平台", p)
+    return ("warn", "平台", "平台标记缺失/非法 → 当前按 Android 安全回退(非已确认); 运行 sudo pdg 触发迁移落定")
+
+def expected_services():
+    """按平台的必需服务集。pdg-probe81 是 iOS 专属(:81 探测), Android 不含。
+    pdg-mitm 由 check_mitm 单独按启用态判定, 不列入必需集。CLI/status/report/healthcheck 统一取此。"""
     svc = _core_svc()
-    names = ("mosdns", svc, "pdg-bot", "pdg-probe81")
+    names = ["mosdns", svc, "pdg-bot"]
+    if _platform() == "ios":
+        names.append("pdg-probe81")
+    return names
+
+def check_services():
+    names = expected_services()
     bad = [s for s in names if _run(["systemctl", "is-active", s])[1].strip() != "active"]
     return ("fail", "服务", "未运行: " + ", ".join(bad)) if bad \
         else ("ok", "服务", "/".join(names) + " 都在")
@@ -316,6 +335,8 @@ def check_deep_dot_handshake():
     return ("ok", "DoT 握手(853)", f"TLS 握手成功, CN={cn}")
 
 def check_deep_probe81():
+    if _platform() != "ios":
+        return None                              # :81 探测是 iOS 专属, Android 不显示也不请求
     rc, out, _ = _run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                        "--max-time", "5", "http://127.0.0.1:81/probe"])
     code = out.strip()
@@ -512,7 +533,7 @@ def check_mitm():
         return ("fail", "MITM 插件", "WLOC 开启但内核为 sing-box(无 MITM 路由层), 请 pdg switch-core mihomo")
     return ("ok", "MITM 插件", "pdg-mitm active + CA + mitm_hijack + mihomo MITM 路由 就位")
 
-ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
+ALL = [check_platform, check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
        check_internal_cidr, check_nft, check_gms, check_mosdns_ratelimit, check_mem,
        check_cert, check_dns, check_singbox_config, check_mitm_structure, check_mitm]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
