@@ -38,19 +38,24 @@ e2e_enter(){
     mount -t overlay overlay -o "lowerdir=/usr/local/bin,upperdir=$E2E_OVL/bu,workdir=$E2E_OVL/bw" /usr/local/bin
     mount -t overlay overlay -o "lowerdir=/opt,upperdir=$E2E_OVL/ou,workdir=$E2E_OVL/ow" /opt
     mount -t tmpfs tmpfs /run 2>/dev/null || true            # pdg 的 flock 落在 /run(宿主归真 root)
+    # 快照目录在 /var/lib/privdns-gateway; 宿主 /var/lib 归真 root, 不覆盖就建不了快照,
+    # 而"快照失败即中止更新"是有意设计 → 不覆盖的话整条 update 路径根本走不到。
+    mount -t overlay overlay -o "lowerdir=/var/lib,upperdir=$E2E_OVL/vu,workdir=$E2E_OVL/vw" /var/lib \
+      2>/dev/null || mount -t tmpfs tmpfs /var/lib 2>/dev/null || true
     mkdir -p /var/lib/privdns-gateway 2>/dev/null || true
     return 0
   fi
   unshare -rm true 2>/dev/null || e2e_skip "本环境不支持 unshare -rm(需用户+挂载命名空间)"
   E2E_OVL="$(mktemp -d)"
   # 宿主 /etc 里归真 root 的路径在 userns 里映射成 nobody, 改不动 → 先在 upperdir 里建好(归本人)
-  mkdir -p "$E2E_OVL"/{eu,ew,bu,bw,ou,ow}
+  mkdir -p "$E2E_OVL"/{eu,ew,bu,bw,ou,ow,vu,vw}
   mkdir -p "$E2E_OVL"/eu/{mosdns/rules,sing-box,mihomo,privdns-gateway,systemd/system,systemd/journald.conf.d}
   : > "$E2E_OVL"/eu/nftables.conf
   local rc=0
   PDG_E2E_INNER=1 E2E_OVL="$E2E_OVL" E2E_ROOT="$E2E_ROOT" \
     unshare -rm bash "$0" "$@" || rc=$?
-  rm -rf "$E2E_OVL"
+  # overlay 的 workdir 归 namespace 内的 root, 外层删不掉 → 再进一次 namespace 清理
+  unshare -rm bash -c 'rm -rf "$1"' _ "$E2E_OVL" 2>/dev/null || rm -rf "$E2E_OVL" 2>/dev/null
   exit "$rc"
 }
 
@@ -170,6 +175,18 @@ e2e_seed_nft(){
 e2e_seed_singbox_model(){
   sed -e "s|__SERVER_IP__|$E2E_SIP|g" -e "s|__INTERNAL_CIDR__|$E2E_CIDR|g" -e 's|__SSH_PORT__|22|g' \
       "$E2E_ROOT/deploy/singbox/config.json.tmpl" > /etc/sing-box/config.json
+}
+
+# 自签占位证书(装机时 PDG_SKIP_CERT 也是这么做的)。没有它 doctor 的证书项必 fail,
+# 而 update 的校验门见 fail 就回滚 —— 整条更新路径根本走不完。
+e2e_seed_cert(){
+  command -v openssl >/dev/null 2>&1 || return 1
+  mkdir -p /etc/mosdns/certs
+  openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+    -keyout /etc/mosdns/certs/privkey.pem -out /etc/mosdns/certs/fullchain.pem \
+    -subj "/CN=dot.e2e.test" >/dev/null 2>&1 || return 1
+  chmod 600 /etc/mosdns/certs/privkey.pem
+  echo dot.e2e.test > /opt/pdg-bot/dot-domain
 }
 
 # 起真 mosdns 在 127.0.0.1:15353(上游指向死端口, 保证快速失败且不外连)

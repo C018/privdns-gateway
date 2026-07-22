@@ -52,7 +52,8 @@ python3(){
       case "${DOCTOR_OUT:-ok}" in
         ok)      echo '[{"level":"ok","check":"服务","detail":"都在"}]';;
         warn)    echo '[{"level":"ok","check":"服务","detail":"都在"},{"level":"warn","check":"证书","detail":"30天内到期"}]';;
-        fail)    echo '[{"level":"fail","check":"防火墙","detail":"7893 对全网开放"}]';;
+        fail)    echo '[{"level":"fail","check":"防火墙","detail":"7893 对全网开放"}]'; return 1;;
+        onlybot) echo '[{"level":"ok","check":"平台","detail":"android"},{"level":"fail","check":"服务","detail":"未运行: pdg-bot"}]'; return 1;;
         empty)   printf '';;
         badjson) echo '{ not json';;
         notarr)  echo '{"level":"ok"}';;
@@ -102,6 +103,12 @@ assert_fail_rollback "doctor 输出为空"          "DOCTOR_OUT=empty"
 assert_fail_rollback "doctor 输出非法 JSON"     "DOCTOR_OUT=badjson"
 assert_fail_rollback "doctor 输出不是数组"      "DOCTOR_OUT=notarr"
 assert_fail_rollback "doctor 报 fail 项"        "DOCTOR_OUT=fail"
+
+# doctor 的退出码 1 = "有 fail", 是**正常结果**不是崩溃 —— 必须继续按 JSON 判定, 否则
+# "未配 token 时 pdg-bot 未运行"的豁免被绕过, 没配 token 的机器永远升不了级。
+r=$(run "DOCTOR_OUT=onlybot"); rc="${r%%|*}"; out="${r#*|}"
+{ [[ "$rc" == 0 ]] && grep -q '✅ 已更新' <<<"$out" && ! grep -q ROLLBACK_CALLED <<<"$out"; } \
+  && ok "未配 token: 唯一的 fail 是'pdg-bot 未运行' → 豁免, 更新照常完成" || bad "token 豁免失效: rc=$rc out=$out"
 
 # 只有 warn: 应当仍算成功, 且把警告展示出来
 r=$(run "DOCTOR_OUT=warn"); rc="${r%%|*}"; out="${r#*|}"

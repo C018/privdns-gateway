@@ -1023,8 +1023,12 @@ cmd_update(){
     cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
   j=$(python3 /opt/pdg-bot/doctor.py --json 2>/dev/null) || rcd=$?
-  if [[ "$rcd" != 0 ]]; then
-    c_y "自检命令执行失败(exit $rcd), 无法确认更新结果, 回滚到更新前快照…"
+  # doctor 的约定是"有 fail → 1, 否则 0", 所以 **1 是正常结果**而不是"没跑起来"。
+  # 把 1 也当异常会直接绕过下面按 JSON 做的判定 —— 包括"未配 token 时 pdg-bot 未运行"
+  # 那条豁免, 于是没配 bot token 的机器会永远升级失败; 也拿不到逐项失败清单。
+  # 真正的异常是**别的**退出码(崩溃 / 找不到 / 被杀)。
+  if [[ "$rcd" != 0 && "$rcd" != 1 ]]; then
+    c_y "自检命令异常退出(exit $rcd), 无法确认更新结果, 回滚到更新前快照…"
     cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
   if ! summary=$(printf '%s' "$j" | python3 -c '

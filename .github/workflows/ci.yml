@@ -224,7 +224,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            bash curl ca-certificates python3 tar gzip unzip dnsutils git coreutils >/dev/null
+            bash curl ca-certificates python3 tar gzip unzip dnsutils git coreutils openssl >/dev/null
       - name: E2E 老装升级 (v1.4.x 现场跑真实 pdg __migrate, 三场景 + 幂等)
         env: { PDG_E2E_ISOLATED: "1" }
         run: bash tests/e2e-migrate.sh
@@ -234,3 +234,12 @@ jobs:
       - name: E2E 内核切换 (两内核真二进制真切换 + 不可转换出口必须点名拒绝)
         env: { PDG_E2E_ISOLATED: "1" }
         run: bash tests/e2e-switch-core.sh
+      - name: E2E 全新安装 (真跑 install.sh: 落地全套 / 拒绝重装 / 失败回滚干净)
+        env: { PDG_E2E_ISOLATED: "1" }
+        run: bash tests/e2e-install.sh
+      - name: E2E 更新全流程 (真 git 仓库两个 tag: 更新成功 / doctor失败回滚 / 快照回滚)
+        env: { PDG_E2E_ISOLATED: "1" }
+        run: bash tests/e2e-update.sh
+      - name: E2E WLOC (真事务开关 + 真坐标改写 + 平台门控)
+        env: { PDG_E2E_ISOLATED: "1" }
+        run: bash tests/e2e-wloc.sh
