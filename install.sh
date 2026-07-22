@@ -80,6 +80,10 @@ INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0
 # 安装状态: 全部在注册 EXIT trap 前初始化 —— rollback 在 set -u 下读到未赋值的变量会
 # 二次崩溃, 把最初的安装错误盖掉, 还会漏掉它后面的 nftables/resolved/resolv.conf 还原。
 PRIOR_INSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; MIHOMO_INSTALLED=0; RESOLVED_DISABLED=0
+# 二进制安装事务台账: 每项 "目标路径|装前是否存在(0/1)|备份路径|装前SHA"。
+# 只要"即将改动目标"就先记一笔 —— *_INSTALLED 表示的是"装成功了吗", 不能拿来表示
+# "这次碰过目标没有": install 写了一半才失败时它还是 0, 回滚就会漏掉那个半成品。
+BIN_TXN=()
 [[ -f /opt/pdg-bot/bot.py || -x /usr/local/bin/pdg ]] && PRIOR_INSTALL=1
 
 # 已有部署: install.sh 会重写配置, 半途失败难以无损还原 → 默认拒绝, 引导走 pdg update(带快照+回滚)。
@@ -91,24 +95,74 @@ if [[ "$PRIOR_INSTALL" == 1 ]]; then
   确要原机覆盖重装(会重写配置): sudo PDG_FORCE_REINSTALL=1 ./install.sh"
   fi
   FORCED_REINSTALL=1
-  c_y "PDG_FORCE_REINSTALL: 在已有部署上覆盖重装 → 先留一份快照(失败可 pdg rollback)…"
-  pdg snapshot >/dev/null 2>&1 || c_y "  (快照失败, 仍继续; 万一失败可能无法自动恢复)"
+  # 覆盖重装会重写既有部署的配置, 没有快照就等于不可恢复 → 快照拿不到就在动任何文件之前中止。
+  command -v pdg >/dev/null 2>&1 \
+    || die "PDG_FORCE_REINSTALL: 找不到 pdg 命令, 无法在覆盖前留快照 → 中止。"
+  c_y "PDG_FORCE_REINSTALL: 在已有部署上覆盖重装 → 先留一份快照…"
+  pdg snapshot >/dev/null 2>&1 \
+    || die "覆盖重装前快照失败 → 中止(拒绝在无法恢复配置的前提下覆盖已有部署)。"
 fi
+
+_sha(){ sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 
 # 覆盖既有内核/解析器二进制前先留一份原件。别人装的 mosdns/sing-box/mihomo(哪怕版本
 # 不同)不算"本次新增", 回滚时应当还原原件而不是删掉。
+#
+# 返回非 0 = 备份不可靠, 调用方**必须中止**, 绝不能继续覆盖 —— 备份失败还照装, 等于
+# 在没有退路的前提下改别人的二进制。目标本来就不存在时返回 0(没什么可留)。
 _stash_bin(){
-  [[ -e "$1" ]] && cp -a "$1" "$1.pdg-preinstall" 2>/dev/null
-  return 0                        # 装前不存在(没什么可留)也算正常
-}
-# 回滚用: 有原件就还原回去, 没有则说明是本次新增 → 删掉。返回非 0 表示这项没弄干净。
-_restore_bin(){
-  local p="$1"
-  if [[ -e "$p.pdg-preinstall" ]]; then
-    mv -f "$p.pdg-preinstall" "$p" 2>/dev/null
-  else
-    rm -f "$p" 2>/dev/null
+  local p="$1" bak="$1.pdg-preinstall" tmp sha
+  if [[ ! -e "$p" ]]; then
+    BIN_TXN+=("$p|0||")               # 仍要记账: 回滚时要删掉本次可能留下的半成品
+    return 0
   fi
+  if [[ -e "$bak" ]]; then            # 上次跑剩下的, 来源不明 —— 绝不能用当前文件盖掉它
+    c_y "发现上次遗留的备份: $bak"
+    c_y "  来源不明, 拒绝覆盖。请先人工确认(确是旧版就 mv 回 $p, 无用则删除), 再重跑。"
+    return 1
+  fi
+  sha="$(_sha "$p")"
+  [[ -n "$sha" ]] || { c_y "读不到 $p 的校验和 → 中止(无法保证可回退)。"; return 1; }
+  # 先写同目录临时文件, 校验通过再原子 mv 落位: 半截拷贝不会被当成完整原件
+  tmp="$(mktemp "$(dirname "$p")/.pdg-stash.XXXXXX" 2>/dev/null)" \
+    || { c_y "无法在 $(dirname "$p") 创建临时文件 → 中止。"; return 1; }
+  if ! cp -a "$p" "$tmp" 2>/dev/null || [[ "$(_sha "$tmp")" != "$sha" ]]; then
+    rm -f "$tmp" 2>/dev/null
+    c_y "备份 $p 失败(拷贝不完整) → 中止, 不在无法回退的前提下覆盖二进制。"; return 1
+  fi
+  if ! mv -f "$tmp" "$bak" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null; c_y "备份落位失败 → 中止。"; return 1
+  fi
+  BIN_TXN+=("$p|1|$bak|$sha")
+  return 0
+}
+
+# 回滚二进制: 按事务台账逐条独立处理, 失败计入调用方的 failed(动态作用域)。
+# 台账在"即将改动目标"之前就记好, 所以 install 写了一半才失败也能被恢复 ——
+# 用 *_INSTALLED(装成功了吗)判断"这次碰过目标没有"会漏掉正是这种情况。
+_rollback_bins(){
+  local entry p pre bak sha
+  for entry in ${BIN_TXN[@]+"${BIN_TXN[@]}"}; do
+    IFS='|' read -r p pre bak sha <<<"$entry"
+    if [[ "$pre" == 1 ]]; then
+      if [[ -z "$bak" || ! -e "$bak" ]]; then failed+=("还原 $p(备份丢失)"); continue; fi
+      if ! mv -f "$bak" "$p" 2>/dev/null;   then failed+=("还原 $p(mv 失败)");  continue; fi
+      # 只看"文件在"不够: 必须确认还原出来的确实等于备份下来的那一份
+      if [[ -n "$sha" && "$(_sha "$p")" != "$sha" ]]; then failed+=("还原 $p(校验和不符)"); continue; fi
+    else
+      rm -f "$p" 2>/dev/null || failed+=("移除 $p")
+    fi
+  done
+}
+
+# 安装确认成功后清理备份(原件不再需要)。
+_commit_bins(){
+  local entry p pre bak sha
+  for entry in ${BIN_TXN[@]+"${BIN_TXN[@]}"}; do
+    IFS='|' read -r p pre bak sha <<<"$entry"
+    [[ -n "$bak" ]] && rm -f "$bak" 2>/dev/null
+  done
+  return 0
 }
 
 rollback(){
@@ -118,25 +172,47 @@ rollback(){
   [[ "${ROLLBACK_DONE:-0}" == 1 ]] && return; ROLLBACK_DONE=1
   if [[ "${FORCED_REINSTALL:-0}" == 1 ]]; then
     c_y "覆盖重装中途失败 —— 既有部署的配置可能已被改写。"
-    c_y "  恢复:  sudo pdg rollback   (用安装前那份快照), 再  sudo pdg doctor  复查。"
-    return
+    # 配置交给 pdg rollback(有安装前快照), 但**本次事务动过的二进制必须自己还原**:
+    # 旧版本的快照未必含内核二进制, 指望 pdg rollback 收拾它们并不可靠。
+    _rollback_bins
+    if [[ ${#failed[@]} -eq 0 ]]; then
+      c_y "  本次覆盖的二进制已还原(无备份残留)。"
+    else
+      c_y "  以下二进制未能还原, 请手工检查: ${failed[*]}"
+    fi
+    c_y "  恢复配置:  sudo pdg rollback   (用安装前那份快照), 再  sudo pdg doctor  复查。"
+    [[ ${#failed[@]} -eq 0 ]] || return 1
+    return 0
   fi
   c_y "安装失败 → 回滚本次全新安装的改动…"
-  systemctl disable --now pdg-bot pdg-probe81 mosdns sing-box mihomo pdg-mitm \
-      pdg-rules-update.timer pdg-health.timer 2>/dev/null
-  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,mihomo,pdg-mitm,pdg-rules-update,pdg-health}.service \
-        /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
-        /etc/systemd/journald.conf.d/50-pdg.conf /etc/systemd/system/journald.conf.d/50-pdg.conf   # 正确 + 历史错路径都删
-  systemctl daemon-reload 2>/dev/null
+  # 各步骤相互独立: 单项失败只记账, 不挡住后面的恢复; 但也绝不因此谎报"已回滚"。
+  local units="pdg-bot.service pdg-probe81.service mosdns.service sing-box.service mihomo.service
+               pdg-mitm.service pdg-rules-update.service pdg-health.service
+               pdg-rules-update.timer pdg-health.timer"
+  for u in $units; do
+    [[ -e "/etc/systemd/system/$u" ]] || continue        # 本次没创建过的 unit 不算失败
+    systemctl disable --now "$u" >/dev/null 2>&1 || failed+=("停用 $u")
+  done
+  for u in $units; do
+    [[ -e "/etc/systemd/system/$u" ]] || continue
+    rm -f "/etc/systemd/system/$u" || failed+=("删除 unit $u")
+  done
+  for d in /etc/systemd/journald.conf.d/50-pdg.conf /etc/systemd/system/journald.conf.d/50-pdg.conf; do
+    [[ -e "$d" ]] || continue                            # 正确 + 历史错路径都删
+    rm -f "$d" || failed+=("删除 $d")
+  done
+  systemctl daemon-reload 2>/dev/null || failed+=("daemon-reload")
   systemctl restart systemd-journald 2>/dev/null || true   # CanReload=no: 必须 restart 才松开封顶
-  nft delete table inet pdg 2>/dev/null
-  rm -rf /etc/mosdns /etc/sing-box /etc/mihomo /opt/pdg-bot /etc/privdns-gateway
-  rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
-  # 只撤本次安装对二进制的改动: *_INSTALLED 仅在真正下载并安装后才置 1。装前不存在的删掉,
-  # 装前已存在(本次被覆盖)的还原回原件 —— 两种情况都不会留下"别人的二进制被我们删了"。
-  [[ "${MOSDNS_INSTALLED:-0}"  == 1 ]] && { _restore_bin /usr/local/bin/mosdns   || failed+=("还原/移除 mosdns"); }
-  [[ "${SINGBOX_INSTALLED:-0}" == 1 ]] && { _restore_bin /usr/local/bin/sing-box || failed+=("还原/移除 sing-box"); }
-  [[ "${MIHOMO_INSTALLED:-0}"  == 1 ]] && { _restore_bin /usr/local/bin/mihomo   || failed+=("还原/移除 mihomo"); }
+  if nft list table inet pdg >/dev/null 2>&1; then         # 表不存在不算失败
+    nft delete table inet pdg 2>/dev/null || failed+=("删除 nft 表 inet pdg")
+  fi
+  for d in /etc/mosdns /etc/sing-box /etc/mihomo /opt/pdg-bot /etc/privdns-gateway; do
+    [[ -e "$d" ]] || continue
+    rm -rf "$d" || failed+=("删除 $d")
+  done
+  rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh} \
+    || failed+=("删除本次安装的管理脚本")
+  _rollback_bins        # 按事务台账还原/清除二进制(装前存在的还原原件, 不存在的删半成品)
   # 还原系统级改动(仅全新安装才到这里)。逐项独立判定: 任一项失败都不许挡住后面的还原。
   if [[ -e /etc/nftables.conf.pdg-orig ]]; then
     if cp -a /etc/nftables.conf.pdg-orig /etc/nftables.conf 2>/dev/null; then
@@ -157,16 +233,18 @@ rollback(){
     c_y "已回滚到安装前状态。修正问题后可重跑 install.sh。"
   else
     c_y "回滚已尽力执行完, 但以下项未能恢复, 请手工检查: ${failed[*]}"
+    return 1
   fi
 }
 # 不在此处 exit: 让 shell 保持触发退出的原始状态码, 回滚的失败不改写最初的安装错误。
 on_exit(){
   local rc="$1"
   if [[ "${INSTALL_OK:-0}" == 1 || "$rc" == 0 ]]; then
-    rm -f /usr/local/bin/{mosdns,sing-box,mihomo}.pdg-preinstall 2>/dev/null   # 装成了, 原件备份不再需要
+    _commit_bins                      # 装成了, 原件备份不再需要
     return 0
   fi
-  rollback
+  rollback || true                    # 回滚自身的成败已在上面打印, 不改写最初的安装退出码
+  return 0
 }
 trap 'on_exit $?' EXIT
 
@@ -184,8 +262,10 @@ if ! command -v mosdns >/dev/null; then
   curl -fsSL "https://github.com/IrineSistiana/mosdns/releases/download/${MOSDNS_VER}/mosdns-linux-${MARCH}.zip" -o "$t/m.zip"
   pdg_verify_sha256 "$t/m.zip" "${PDG_SHA256[mosdns-$MARCH]:-}" "mosdns $MOSDNS_VER ($MARCH)" \
     || { rm -rf "$t"; die "mosdns 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
-  _stash_bin /usr/local/bin/mosdns
+  _stash_bin /usr/local/bin/mosdns || die "备份既有 mosdns 失败 → 中止(不在无法回退的前提下覆盖二进制)。"
   (cd "$t" && unzip -q m.zip && install -m755 mosdns /usr/local/bin/mosdns)
+  # shellcheck disable=SC2034  # 保留为"装成功了吗"的标记并保持 trap 前初始化;
+  # 回滚已改看 BIN_TXN 事务台账(它才代表"这次碰过目标没有")。
   MOSDNS_INSTALLED=1
   rm -rf "$t"
 fi
@@ -202,9 +282,11 @@ if [[ "$CORE" == mihomo ]]; then
     pdg_verify_sha256 "$t/mihomo.gz" "${PDG_SHA256[mihomo-$MARCH]:-}" "mihomo $MIHOMO_VER ($MARCH)" \
       || { rm -rf "$t"; die "mihomo 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
     gunzip -c "$t/mihomo.gz" > "$t/mihomo"
-    _stash_bin /usr/local/bin/mihomo
+    _stash_bin /usr/local/bin/mihomo || die "备份既有 mihomo 失败 → 中止(不在无法回退的前提下覆盖二进制)。"
     install -m755 "$t/mihomo" /usr/local/bin/mihomo
-    MIHOMO_INSTALLED=1
+    # shellcheck disable=SC2034  # 保留为"装成功了吗"的标记并保持 trap 前初始化;
+  # 回滚已改看 BIN_TXN 事务台账(它才代表"这次碰过目标没有")。
+  MIHOMO_INSTALLED=1
     rm -rf "$t"
   fi
 else
@@ -216,9 +298,11 @@ else
     pdg_verify_sha256 "$t/sb.tgz" "${PDG_SHA256[singbox-$MARCH]:-}" "sing-box $SINGBOX_VER ($MARCH)" \
       || { rm -rf "$t"; die "sing-box 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
     tar -xzf "$t/sb.tgz" -C "$t"
-    _stash_bin /usr/local/bin/sing-box
+    _stash_bin /usr/local/bin/sing-box || die "备份既有 sing-box 失败 → 中止(不在无法回退的前提下覆盖二进制)。"
     install -m755 "$t"/sing-box-*/sing-box /usr/local/bin/sing-box
-    SINGBOX_INSTALLED=1
+    # shellcheck disable=SC2034  # 保留为"装成功了吗"的标记并保持 trap 前初始化;
+  # 回滚已改看 BIN_TXN 事务台账(它才代表"这次碰过目标没有")。
+  SINGBOX_INSTALLED=1
     rm -rf "$t"
   fi
 fi

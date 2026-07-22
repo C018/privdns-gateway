@@ -692,13 +692,23 @@ cmd_rollback(){
   # 内核配置校验: 按**快照记录的** backend(而非当前) 校验快照里对应内核配置
   local snap_core; snap_core="$(cat "$tree/etc/privdns-gateway/backend" 2>/dev/null)"
   [[ "$snap_core" == mihomo || "$snap_core" == singbox ]] || snap_core="$(_pdg_core)"
+  # 校验快照里的旧配置要用**快照自带的那个内核**。拿当前(可能刚升上来的新版)内核去校验旧
+  # 配置, 新核不认旧配置时会把回滚自己挡住 —— 而旧核和旧配置本来就该一起回去。
+  # 只有旧快照确实不含内核二进制时, 才退回用当前内核校验, 并明确提示。
+  local snap_svc snap_kbin=""
+  snap_svc="$([[ "$snap_core" == mihomo ]] && echo mihomo || echo sing-box)"
+  [[ -x "$tree/usr/local/bin/$snap_svc" ]] && snap_kbin="$tree/usr/local/bin/$snap_svc"
+  if [[ -z "$snap_kbin" ]] \
+     && { [[ -f "$tree/etc/mihomo/config.yaml" ]] || [[ -f "$tree/etc/sing-box/config.json" ]]; }; then
+    c_y "  快照不含 $snap_svc 二进制(旧版快照)→ 退回用当前内核校验旧配置; 新核若不认旧配置会报错。"
+  fi
   if [[ "$snap_core" == mihomo ]]; then
-    [[ -f "$tree/etc/mihomo/config.yaml" ]] && { mihomo -t -d "$tree/etc/mihomo" -f "$tree/etc/mihomo/config.yaml" >/dev/null 2>&1 || { echo "❌ 快照的 mihomo 配置 check 失败, 中止"; rm -rf "$tmp"; return 1; }; }
+    [[ -f "$tree/etc/mihomo/config.yaml" ]] && { "${snap_kbin:-mihomo}" -t -d "$tree/etc/mihomo" -f "$tree/etc/mihomo/config.yaml" >/dev/null 2>&1 || { echo "❌ 快照的 mihomo 配置 check 失败, 中止"; rm -rf "$tmp"; return 1; }; }
   elif [[ -f "$tree/etc/sing-box/config.json" ]]; then
     if ! sed "s#/etc/sing-box/rs/#$tree/etc/sing-box/rs/#g" "$tree/etc/sing-box/config.json" > "$tmp/sb.chk"; then
       echo "❌ 快照的 sing-box 校验副本生成失败, 中止"; rm -rf "$tmp"; return 1
     fi
-    sing-box check -c "$tmp/sb.chk" >/dev/null 2>&1 || { echo "❌ 快照的 sing-box 配置 check 失败, 中止"; rm -rf "$tmp"; return 1; }
+    "${snap_kbin:-sing-box}" check -c "$tmp/sb.chk" >/dev/null 2>&1 || { echo "❌ 快照的 sing-box 配置 check 失败, 中止"; rm -rf "$tmp"; return 1; }
     rm -f "$tmp/sb.chk"
   fi
   [[ -f "$tree/etc/nftables.conf" ]] && { nft -c -f "$tree/etc/nftables.conf" >/dev/null 2>&1 || { echo "❌ 快照的 nftables 语法错, 中止"; rm -rf "$tmp"; return 1; }; }
@@ -768,13 +778,38 @@ _core_kernel_stable(){
   [[ "$(systemctl is-active "$svc" 2>/dev/null)" == active ]]
 }
 
-# 还原上一版内核二进制并把旧核重新拉起; 返回"旧核是否确实 active"(还原也失败才是真无救)。
+_pdg_sha(){ sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# 把当前内核二进制备份到**本次事务专属**的临时文件, 回显 "备份路径|SHA256"。
+# 用 mktemp 而不是固定的 <svc>.prev: 固定名会撞上历史遗留的 .prev —— 备份没拷成时
+# 那个来源不明的旧文件会在还原那步被 mv 成正在跑的内核。
+# 旧内核存在但备份没做成 → 返回非 0, 调用方必须中止, 绝不能去装新内核。
+_core_stash_kernel(){
+  local svc="$1" bindir="$2" tmp sha
+  local bin="$bindir/$svc"
+  [[ -e "$bin" ]] || { echo "|"; return 0; }        # 装前没有旧内核: 没什么可备份
+  sha="$(_pdg_sha "$bin")"; [[ -n "$sha" ]] || return 1
+  tmp="$(mktemp "$bindir/.$svc.pdg-prev.XXXXXX" 2>/dev/null)" || return 1
+  if ! cp -a "$bin" "$tmp" 2>/dev/null || [[ "$(_pdg_sha "$tmp")" != "$sha" ]]; then
+    rm -f "$tmp" 2>/dev/null; return 1
+  fi
+  echo "$tmp|$sha"
+}
+
+# 还原本次事务备份的旧内核并重新拉起。逐项校验: mv 成功 → 内容 SHA 与备份一致 →
+# 旧服务 active 且稳定。任一步不达标返回非 0(只看"服务 active"不算数)。
 _core_restore_prev(){
-  local svc="$1" bindir="${2:-$(_core_bindir)}"
-  local bin="$bindir/$svc" prev="$bindir/$svc.prev"
-  [[ -f "$prev" ]] && mv -f "$prev" "$bin"
+  local svc="$1" bindir="${2:-$(_core_bindir)}" bak="${3:-}" sha="${4:-}"
+  local bin="$bindir/$svc"
+  if [[ -n "$bak" ]]; then
+    [[ -e "$bak" ]] || { c_y "  旧内核备份不存在($bak), 无法还原"; return 1; }
+    mv -f "$bak" "$bin" 2>/dev/null || { c_y "  旧内核还原失败(mv)"; return 1; }
+    if [[ -n "$sha" && "$(_pdg_sha "$bin")" != "$sha" ]]; then
+      c_y "  旧内核还原后校验和与备份不符"; return 1
+    fi
+  fi
   systemctl restart "$svc" 2>/dev/null || true
-  [[ "$(systemctl is-active "$svc" 2>/dev/null)" == active ]]
+  _core_kernel_stable "$svc" || { c_y "  旧内核重启后未稳定运行"; return 1; }
 }
 
 # 内核热切(mihomo/sing-box 同一套): 备份旧核 → 装新 → 配置 check → 重启 → 活性/稳定判定。
@@ -782,23 +817,29 @@ _core_restore_prev(){
 # (旧实现在 check 通过时就删了 .prev, 新核重启失败便无核可退)。
 _core_swap_verify(){
   local svc="$1" newbin="$2" bindir="$3" ver="$4"
-  local bin="$bindir/$svc" prev="$bindir/$svc.prev"
-  cp -a "$bin" "$prev" 2>/dev/null
+  local bin="$bindir/$svc" stash bak="" sha=""
+  # 备份必须先成: 拷不下来就在这里停, 绝不能带着"无核可退"的状态去装新内核。
+  if ! stash="$(_core_stash_kernel "$svc" "$bindir")"; then
+    c_y "  备份现有 $svc 失败 → 中止换核(不在无法回退的前提下装新内核)。"; return 1
+  fi
+  IFS='|' read -r bak sha <<<"$stash"
   if ! install -m755 "$newbin" "$bin"; then
-    c_y "  新内核安装失败, 还原旧版内核"; _core_restore_prev "$svc" "$bindir" >/dev/null; return 1
+    c_y "  新内核安装失败, 还原旧版内核"
+    _core_restore_prev "$svc" "$bindir" "$bak" "$sha" || c_y "  ⚠️ 旧版内核回退未达标, 请立即 pdg doctor"
+    return 1
   fi
   if ! _core_config_check "$svc" "$bindir"; then
     c_y "  新版与当前配置不兼容(check 失败), 已还原旧版内核"
-    _core_restore_prev "$svc" "$bindir" || c_y "  ⚠️ 旧版内核回退后仍未 active, 请立即 pdg doctor"
+    _core_restore_prev "$svc" "$bindir" "$bak" "$sha" || c_y "  ⚠️ 旧版内核回退未达标, 请立即 pdg doctor"
     return 1
   fi
   systemctl restart "$svc" 2>/dev/null || true
   if ! _core_kernel_stable "$svc"; then
     c_y "  新版内核重启后未稳定运行, 已还原旧版内核并重启"
-    _core_restore_prev "$svc" "$bindir" || c_y "  ⚠️ 旧版内核回退后仍未 active, 请立即 pdg doctor"
+    _core_restore_prev "$svc" "$bindir" "$bak" "$sha" || c_y "  ⚠️ 旧版内核回退未达标, 请立即 pdg doctor"
     return 1
   fi
-  rm -f "$prev"                                   # 到此新核确认可用, 旧核备份才可以删
+  [[ -n "$bak" ]] && rm -f "$bak" 2>/dev/null    # 到此新核确认可用, 旧核备份才可以删
   c_g "  → $svc $ver 已装并重启"
 }
 
@@ -810,7 +851,9 @@ _update_core_binary(){
   bindir="$(_core_bindir)"
   core="$(_pdg_core)"
   # shellcheck source=/dev/null
-  source "$REPO_DIR/lib/versions.sh" 2>/dev/null || { c_y "读不到 versions.sh, 跳过内核更新"; return 0; }
+  # 读不到 versions.sh 就无从知道该装哪个版本 —— 以前"跳过"后照报成功, 实际内核可能没升上去。
+  source "$REPO_DIR/lib/versions.sh" 2>/dev/null \
+    || { c_y "读不到 versions.sh, 无法确认内核目标版本"; return 1; }
   march=$(dpkg --print-architecture 2>/dev/null); [[ "$march" == arm64 ]] || march=amd64
   tmp=$(mktemp -d)
   if [[ "$core" == mihomo ]]; then
@@ -818,22 +861,24 @@ _update_core_binary(){
     mihomo -v 2>/dev/null | grep -q "$ver" && { rm -rf "$tmp"; return 0; }   # 已是钉死版本
     c_g "更新 mihomo 内核 → $ver …"
     curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${ver}/mihomo-linux-${march}-${ver}.gz" -o "$tmp/m.gz" \
-      || { c_y "  下载失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+      || { c_y "  下载失败(版本与发布不一致, 不能当作已更新)"; rm -rf "$tmp"; return 1; }
     pdg_verify_sha256 "$tmp/m.gz" "${PDG_SHA256[mihomo-$march]:-}" "mihomo $ver ($march)" \
-      || { c_y "  SHA 校验失败, 保留现版本"; rm -rf "$tmp"; return 0; }
-    gunzip -c "$tmp/m.gz" > "$tmp/mihomo" || { c_y "  解压失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+      || { c_y "  SHA 校验失败 → 判为更新失败(不降级成警告后继续)"; rm -rf "$tmp"; return 1; }
+    gunzip -c "$tmp/m.gz" > "$tmp/mihomo" || { c_y "  解压失败"; rm -rf "$tmp"; return 1; }
+    [[ -s "$tmp/mihomo" ]] || { c_y "  解压产物为空"; rm -rf "$tmp"; return 1; }
     if ! _core_swap_verify mihomo "$tmp/mihomo" "$bindir" "$ver"; then rm -rf "$tmp"; return 1; fi
   else
     ver="$SINGBOX_VER"
     sing-box version 2>/dev/null | grep -q "version $ver" && { rm -rf "$tmp"; return 0; }
     c_g "更新 sing-box 内核 → $ver …"
     curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${march}.tar.gz" -o "$tmp/sb.tgz" \
-      || { c_y "  下载失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+      || { c_y "  下载失败(版本与发布不一致, 不能当作已更新)"; rm -rf "$tmp"; return 1; }
     pdg_verify_sha256 "$tmp/sb.tgz" "${PDG_SHA256[singbox-$march]:-}" "sing-box $ver ($march)" \
-      || { c_y "  SHA 校验失败, 保留现版本"; rm -rf "$tmp"; return 0; }
-    tar -xzf "$tmp/sb.tgz" -C "$tmp" || { c_y "  解压失败, 保留现版本"; rm -rf "$tmp"; return 0; }
+      || { c_y "  SHA 校验失败 → 判为更新失败(不降级成警告后继续)"; rm -rf "$tmp"; return 1; }
+    tar -xzf "$tmp/sb.tgz" -C "$tmp" || { c_y "  解压失败"; rm -rf "$tmp"; return 1; }
     cp -f "$tmp"/sing-box-*/sing-box "$tmp/sing-box" 2>/dev/null \
-      || { c_y "  解压产物缺失, 保留现版本"; rm -rf "$tmp"; return 0; }
+      || { c_y "  解压产物缺失"; rm -rf "$tmp"; return 1; }
+    [[ -s "$tmp/sing-box" ]] || { c_y "  解压产物为空"; rm -rf "$tmp"; return 1; }
     if ! _core_swap_verify sing-box "$tmp/sing-box" "$bindir" "$ver"; then rm -rf "$tmp"; return 1; fi
   fi
   rm -rf "$tmp"
@@ -887,13 +932,17 @@ cmd_update(){
     c_y "必需文件安装失败, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
   # iOS 专属组件按平台部署: Android 更新不把 iOS 文件装回来(migrate_android_cleanup 亦会清残留)。
-  # 平台/可选文件容错(不据此回滚): iOS 未启 WLOC 时 mitm 缺席合法; certbot 钩子目录在无 certbot 机上不存在。
+  # iOS 上这些**不是可选项**: probe81 与描述文件模板是 iOS 基础能力, WLOC 开着时 mitm 三件
+  # 也是必需件。以前一律 `|| true`, 装失败就把上一版的旧文件留在原地 → 新旧混装, 而 doctor
+  # 只看"文件在不在", 照样判绿。
   if [[ "$(_pdg_platform)" == ios ]]; then
-    install -m755 "$REPO_DIR"/deploy/bot/mitm_ca.py          /opt/pdg-bot/ 2>/dev/null || true
-    install -m755 "$REPO_DIR"/deploy/bot/mitm_server.py      /opt/pdg-bot/ 2>/dev/null || true
-    install -m755 "$REPO_DIR"/deploy/bot/mitm_wloc.py        /opt/pdg-bot/ 2>/dev/null || true
-    install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/ 2>/dev/null || true
-    install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl 2>/dev/null || true
+    if   ! install -m755 "$REPO_DIR"/deploy/bot/mitm_ca.py          /opt/pdg-bot/ \
+      || ! install -m755 "$REPO_DIR"/deploy/bot/mitm_server.py      /opt/pdg-bot/ \
+      || ! install -m755 "$REPO_DIR"/deploy/bot/mitm_wloc.py        /opt/pdg-bot/ \
+      || ! install -m755 "$REPO_DIR"/deploy/ios/probe81.py          /opt/pdg-bot/ \
+      || ! install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl; then
+      c_y "iOS 平台组件安装失败, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+    fi
   fi
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
@@ -937,22 +986,45 @@ cmd_update(){
     c_y "pdg-bot 更新后起不来, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
 
-  # doctor 自检: 有 fail 回滚, warn 仅提示 (未配 token 时把"服务: 未运行: pdg-bot"这单一项排除, 避免误判)
-  local j fails warns
-  j=$(python3 /opt/pdg-bot/doctor.py --json 2>/dev/null || true)
-  if [[ -n "$j" ]] && command -v jq >/dev/null; then
-    fails=$(echo "$j" | jq -r --argjson t "$token_set" \
-      '[ .[] | select(.level=="fail")
-            | select( ($t==1) or (.check!="服务") or (.detail!="未运行: pdg-bot") ) ] | length' 2>/dev/null)
-    warns=$(echo "$j" | jq -r '[ .[] | select(.level=="warn") ] | length' 2>/dev/null)
-    if [[ "${fails:-0}" -gt 0 ]]; then
-      c_y "自检发现 $fails 项失败, 回滚到更新前快照:"
-      echo "$j" | jq -r '.[] | select(.level=="fail") | "  ❌ \(.check): \(.detail)"'
-      cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
-    fi
-    [[ "${warns:-0}" -gt 0 ]] && { c_y "自检有 $warns 项警告(不回滚, 仅提示):"
-      echo "$j" | jq -r '.[] | select(.level=="warn") | "  ⚠️ \(.check): \(.detail)"'; }
+  # doctor 自检门: 自检本身必须跑通且输出可信, 才有资格说"已更新"。
+  # 以前 doctor 用 `|| true` 吞掉退出码, 且没有 jq 就整段跳过 —— 自检崩了/输出坏了/机器没装
+  # jq, 都会直接跳到"✅ 已更新"。改用 python3 解析(本项目本来就硬依赖 python3, 不再依赖 jq),
+  # 并要求输出是**非空的 JSON 数组**; 任何一环不成立都按"无法确认更新结果"回滚。
+  # (未配 token 时把"服务: 未运行: pdg-bot"这单一项排除, 避免误判)
+  local j rcd=0 summary nfail
+  j=$(python3 /opt/pdg-bot/doctor.py --json 2>/dev/null) || rcd=$?
+  if [[ "$rcd" != 0 ]]; then
+    c_y "自检命令执行失败(exit $rcd), 无法确认更新结果, 回滚到更新前快照…"
+    cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
   fi
+  if ! summary=$(printf '%s' "$j" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if not isinstance(d, list) or not d:
+    raise SystemExit("doctor 输出不是非空 JSON 数组")
+tok = sys.argv[1] == "1"
+fails = [x for x in d if x.get("level") == "fail"
+         and (tok or x.get("check") != "服务" or x.get("detail") != "未运行: pdg-bot")]
+warns = [x for x in d if x.get("level") == "warn"]
+print(len(fails))
+for x in fails: print("  ❌ %s: %s" % (x.get("check"), x.get("detail")))
+print("@@WARN@@")
+for x in warns: print("  ⚠️ %s: %s" % (x.get("check"), x.get("detail")))
+' "$token_set" 2>/dev/null); then
+    c_y "自检输出不可解析(应为非空 JSON 数组), 无法确认更新结果, 回滚到更新前快照…"
+    cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
+  nfail="$(sed -n 1p <<<"$summary")"
+  if [[ ! "$nfail" =~ ^[0-9]+$ ]]; then
+    c_y "自检结果无法判读, 回滚到更新前快照…"; cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
+  if [[ "$nfail" -gt 0 ]]; then
+    c_y "自检发现 $nfail 项失败, 回滚到更新前快照:"
+    sed -n '2,/^@@WARN@@$/p' <<<"$summary" | sed '/^@@WARN@@$/d'
+    cmd_rollback --dir "$snap_dir" --git "$pre_sha"; return 1
+  fi
+  local warnlines; warnlines="$(sed -n '/^@@WARN@@$/,$p' <<<"$summary" | tail -n +2)"
+  [[ -n "$warnlines" ]] && { c_y "自检有警告(不回滚, 仅提示):"; printf '%s\n' "$warnlines"; }
   c_g "✅ 已更新。"
 }
 

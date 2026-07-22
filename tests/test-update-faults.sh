@@ -23,7 +23,7 @@ REPO_DIR="$WORK/repo"; REPO_URL="file:///dev/null"; ENVF="$WORK/none.env"
 need_root(){ :; }; _lock(){ :; }
 c_g(){ echo "$*"; }; c_y(){ echo "$*"; }
 sleep(){ :; }
-_pdg_platform(){ echo android; }
+_pdg_platform(){ echo "${PLATFORM:-android}"; }
 _pdg_core(){ echo singbox; }
 pdg_fetch_release_tags(){ return 0; }
 # 全桩 git: 只控制 reset 成败, 其余给出稳定输出
@@ -44,7 +44,23 @@ install(){ local last="${*: -1}"; [[ -n "${FAIL_INSTALL:-}" && "$*" == *"${FAIL_
 bash(){ [[ "$*" == *__migrate* ]] && return "${MIGRATE_RC:-0}"; command bash "$@"; }
 _update_core_binary(){ [[ -n "${FAIL_CORE:-}" ]] && return 1; return 0; }
 systemctl(){ [[ "${1:-}" == daemon-reload && -n "${FAIL_RELOAD:-}" ]] && return 1; return 0; }
-python3(){ case "$*" in *py_compile*) return 0;; *doctor*) echo ""; return 0;; *) command python3 "$@";; esac; }
+python3(){
+  case "$*" in
+    *py_compile*) return 0;;
+    *doctor.py*)
+      [[ -n "${DOCTOR_RC:-}" ]] && return "$DOCTOR_RC"
+      case "${DOCTOR_OUT:-ok}" in
+        ok)      echo '[{"level":"ok","check":"服务","detail":"都在"}]';;
+        warn)    echo '[{"level":"ok","check":"服务","detail":"都在"},{"level":"warn","check":"证书","detail":"30天内到期"}]';;
+        fail)    echo '[{"level":"fail","check":"防火墙","detail":"7893 对全网开放"}]';;
+        empty)   printf '';;
+        badjson) echo '{ not json';;
+        notarr)  echo '{"level":"ok"}';;
+      esac
+      return 0;;
+    *) command python3 "$@";;
+  esac
+}
 sing-box(){ return 0; }
 mihomo(){ return 0; }
 nft(){ return 0; }
@@ -80,6 +96,34 @@ assert_fail_rollback "必需文件(pdg 主脚本)安装失败" "FAIL_INSTALL=/us
 assert_fail_rollback "__migrate 迁移非0"       "MIGRATE_RC=1"
 assert_fail_rollback "内核二进制更新失败"       "FAIL_CORE=1"
 assert_fail_rollback "daemon-reload 失败"      "FAIL_RELOAD=1"
+# ── doctor 校验门: 命令失败/输出不可信一律回滚, 绝不跳过后报成功 ──
+assert_fail_rollback "doctor 命令非0"          "DOCTOR_RC=2"
+assert_fail_rollback "doctor 输出为空"          "DOCTOR_OUT=empty"
+assert_fail_rollback "doctor 输出非法 JSON"     "DOCTOR_OUT=badjson"
+assert_fail_rollback "doctor 输出不是数组"      "DOCTOR_OUT=notarr"
+assert_fail_rollback "doctor 报 fail 项"        "DOCTOR_OUT=fail"
+
+# 只有 warn: 应当仍算成功, 且把警告展示出来
+r=$(run "DOCTOR_OUT=warn"); rc="${r%%|*}"; out="${r#*|}"
+{ [[ "$rc" == 0 ]] && grep -q '✅ 已更新' <<<"$out" && grep -q '证书' <<<"$out" && ! grep -q ROLLBACK_CALLED <<<"$out"; } \
+  && ok "仅 warn: 正常完成 + 警告被解析展示" || bad "warn 路径: rc=$rc out=$out"
+
+# ══ iOS 平台组件: 在 iOS 上是必需件, 装失败必须回滚(不能 ||true 后留旧版混装) ══
+for f in mitm_ca.py mitm_server.py mitm_wloc.py probe81.py pdg-dot-ondemand.mobileconfig.tmpl; do
+  assert_fail_rollback "iOS: $f 安装失败" "PLATFORM=ios FAIL_INSTALL=$f"
+done
+
+# Android: 这五个文件根本不该被安装 → 即使注入同名失败也不影响更新
+for f in mitm_ca.py probe81.py pdg-dot-ondemand.mobileconfig.tmpl; do
+  r=$(run "PLATFORM=android FAIL_INSTALL=$f"); rc="${r%%|*}"; out="${r#*|}"
+  { [[ "$rc" == 0 ]] && grep -q '✅ 已更新' <<<"$out"; } \
+    && ok "Android: 不安装 iOS 文件 $f(注入其失败也不影响更新)" || bad "Android/$f: rc=$rc out=$out"
+done
+
+# iOS 全部就绪 → 正常完成
+r=$(run "PLATFORM=ios"); rc="${r%%|*}"; out="${r#*|}"
+{ [[ "$rc" == 0 ]] && grep -q '✅ 已更新' <<<"$out" && ! grep -q ROLLBACK_CALLED <<<"$out"; } \
+  && ok "iOS: 五个平台组件均安装成功 → 正常完成" || bad "iOS happy: rc=$rc out=$out"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $nfail"

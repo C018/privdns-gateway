@@ -38,10 +38,10 @@ xfn(){
       if (depth <= 0) exit
     }' "$ROOT/install.sh"
 }
-xfn _stash_bin   >  "$WORK/fn.sh"
-xfn _restore_bin >> "$WORK/fn.sh"
-xfn rollback     >> "$WORK/fn.sh"
-xfn on_exit      >> "$WORK/fn.sh"
+: > "$WORK/fn.sh"
+for _f in _sha _stash_bin _rollback_bins _commit_bins rollback on_exit; do
+  xfn "$_f" >> "$WORK/fn.sh"
+done
 grep -q '^rollback(){' "$WORK/fn.sh" && grep -q '^on_exit(){' "$WORK/fn.sh" \
   || { echo "抽取 rollback/on_exit 失败"; exit 1; }
 # 防呆: 抽出来的东西不该含安装流程的指令(抽多了会真的去跑 apt-get)
@@ -65,6 +65,7 @@ mk_sandbox(){   # 造一个"安装到一半"的现场
 
 # 桩: 测试环境没有 systemd / netlink
 harness(){ cat <<'EOF'
+BIN_TXN=()
 c_g(){ echo "$*"; }; c_y(){ echo "$*"; }
 systemctl(){ echo "systemctl $*" >> "$SB/../calls.log"; return "${SYSTEMCTL_RC:-0}"; }
 nft(){ echo "nft $*" >> "$SB/../calls.log"; return "${NFT_RC:-0}"; }
@@ -72,13 +73,14 @@ EOF
 }
 
 # 在 set -u 下跑 rollback; $1=额外的前置赋值(模拟安装进行到哪一步)
-run_rb(){
+run_rb(){   # $1=前置变量赋值; $2=(可选) source 真身之后、rollback 之前跑的脚本
   : > "$WORK/calls.log"
   env SB="$SB" NFT_RC="${NFT_RC:-0}" SYSTEMCTL_RC="${SYSTEMCTL_RC:-0}" \
     bash -c "set -uo pipefail
 $(harness)
 $1
 source '$WORK/fn.sh'
+${2:-}
 rollback" 2>&1
 }
 
@@ -92,7 +94,10 @@ grep -qE '已回滚到安装前状态|回滚已尽力执行完' <<<"$out" && ok 
 
 # ── B. sing-box 本次新装 → 删掉本次装的 ─────────────────────────────────────
 mk_sandbox
-out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=1; RESOLVED_DISABLED=0')
+out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; RESOLVED_DISABLED=0' \
+  "command rm -f \"\$SB/usr/local/bin/sing-box\"
+_stash_bin \"\$SB/usr/local/bin/sing-box\" || exit 9
+printf 'NEW\n' > \"\$SB/usr/local/bin/sing-box\"")
 grep -q 'unbound variable' <<<"$out" && bad "B: unbound variable" || {
   [[ ! -e "$SB/usr/local/bin/sing-box" ]] && ok "B: sing-box 全新安装后失败 → 本次装的 sing-box 被删" || bad "B: sing-box 未删"; }
 [[ "$(cat "$SB/etc/resolv.conf")" == "ORIG-RESOLV" ]] && ok "B: 后续系统级还原仍完整执行" || bad "B: 系统级还原未执行"
@@ -105,7 +110,10 @@ out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLE
 
 # ── D. mihomo 本次新装 → 只删本次新增的 ─────────────────────────────────────
 mk_sandbox
-out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; MIHOMO_INSTALLED=1; RESOLVED_DISABLED=0')
+out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; MIHOMO_INSTALLED=0; RESOLVED_DISABLED=0' \
+  "command rm -f \"\$SB/usr/local/bin/mihomo\"
+_stash_bin \"\$SB/usr/local/bin/mihomo\" || exit 9
+printf 'NEW\n' > \"\$SB/usr/local/bin/mihomo\"")
 [[ ! -e "$SB/usr/local/bin/mihomo" ]] && ok "D: mihomo 本次新装 → 被删" || bad "D: 本次新装的 mihomo 未删"
 [[ -e "$SB/usr/local/bin/mosdns" ]] && ok "D: 装前已有的 mosdns(未标记本次安装) 不被删" || bad "D: 误删了装前已有的 mosdns"
 
@@ -135,12 +143,14 @@ grep -q 'unbound variable' <<<"$out" && bad "F: 回滚过程报 unbound variable
 [[ "$(cat "$SB/etc/resolv.conf")" == "ORIG-RESOLV" ]] && ok "F: 走 EXIT trap 时系统级还原完整" || bad "F: EXIT trap 下还原不完整"
 
 # ── H. 装前已存在(本次被覆盖) → 回滚还原**原件**, 不是删掉 ────────────────
-# 别人装的 mosdns/sing-box/mihomo(哪怕版本不同)不算"本次新增", 覆盖前留了 .pdg-preinstall。
+# 别人装的 mosdns/sing-box/mihomo(哪怕版本不同)不算"本次新增"。走真实 _stash_bin 建账,
+# 与线上流程一致(旧写法手工摆 .pdg-preinstall + *_INSTALLED=1, 已不是现在的机制)。
 mk_sandbox
-printf 'OLD-SINGBOX-v1.9\n' > "$SB/usr/local/bin/sing-box.pdg-preinstall"   # 覆盖前留的原件
-OLDSHA=$(sha256sum "$SB/usr/local/bin/sing-box.pdg-preinstall" | cut -d' ' -f1)
-printf 'NEW-SINGBOX-v1.12\n' > "$SB/usr/local/bin/sing-box"                 # 本次装上去的新版
-out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=1; RESOLVED_DISABLED=0')
+printf 'OLD-SINGBOX-v1.9\n' > "$SB/usr/local/bin/sing-box"
+OLDSHA=$(sha256sum "$SB/usr/local/bin/sing-box" | cut -d' ' -f1)
+out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; RESOLVED_DISABLED=0' \
+  "_stash_bin \"\$SB/usr/local/bin/sing-box\" || exit 9
+printf 'NEW-SINGBOX-v1.12\n' > \"\$SB/usr/local/bin/sing-box\"")
 if [[ -e "$SB/usr/local/bin/sing-box" ]] \
    && [[ "$(sha256sum "$SB/usr/local/bin/sing-box" | cut -d' ' -f1)" == "$OLDSHA" ]]; then
   ok "H: 覆盖了装前已有的 sing-box → 回滚按 sha 还原原件(不误删别人的)"
@@ -150,11 +160,13 @@ else bad "H: 未还原原件 (内容=$(cat "$SB/usr/local/bin/sing-box" 2>/dev/n
 
 # ── I. 装前不存在(纯新增) → 仍然删掉 ─────────────────────────────────────
 mk_sandbox
-rm -f "$SB/usr/local/bin/mihomo.pdg-preinstall"      # 无原件备份 = 本次新增
-out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; MIHOMO_INSTALLED=1; RESOLVED_DISABLED=0')
+out=$(run_rb 'INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; MIHOMO_INSTALLED=0; RESOLVED_DISABLED=0' \
+  "command rm -f \"\$SB/usr/local/bin/mihomo\"
+_stash_bin \"\$SB/usr/local/bin/mihomo\" || exit 9
+printf 'NEW\n' > \"\$SB/usr/local/bin/mihomo\"")
 [[ ! -e "$SB/usr/local/bin/mihomo" ]] && ok "I: 装前不存在的 mihomo(无备份) → 仍按新增删除" || bad "I: 本次新增的 mihomo 未删"
 
-# ── J. _stash_bin 语义 + 成功路径清理备份 ─────────────────────────────────
+# ── J. _stash_bin 语义 + 成功路径按事务台账清理备份 ───────────────────────
 mk_sandbox
 out=$(env SB="$SB" bash -c "set -uo pipefail
 $(harness)
@@ -166,12 +178,14 @@ echo rc=\$?" 2>&1)
 [[ ! -e "$SB/usr/local/bin/nonexistent.pdg-preinstall" ]] && grep -q 'rc=0' <<<"$out" \
   && ok "J: _stash_bin 对不存在的二进制不留备份且返回 0(装前没有不算异常)" || bad "J: 空 stash 行为不对 out=$out"
 
-# 成功安装(INSTALL_OK=1) → on_exit 清掉所有 .pdg-preinstall, 且不动二进制本身
-printf 'x\n' > "$SB/usr/local/bin/sing-box.pdg-preinstall"
+# 成功安装(INSTALL_OK=1) → on_exit 按台账清掉备份, 且不动二进制本身
+mk_sandbox
 out=$(env SB="$SB" bash -c "set -uo pipefail
 $(harness)
 INSTALL_OK=1
 source '$WORK/fn.sh'
+_stash_bin '$SB/usr/local/bin/mihomo'  || exit 9
+_stash_bin '$SB/usr/local/bin/sing-box' || exit 9
 on_exit 0" 2>&1)
 if [[ ! -e "$SB/usr/local/bin/mihomo.pdg-preinstall" && ! -e "$SB/usr/local/bin/sing-box.pdg-preinstall" ]]; then
   ok "J: 安装成功 → .pdg-preinstall 备份被清理干净"

@@ -112,6 +112,9 @@ jobs:
       - name: "install 回滚回归 (set -u 下不因未初始化变量二次崩溃; 系统级还原完整; 只删本次新装)"
         run: bash tests/test-install-rollback.sh
 
+      - name: "install 二进制事务回归 (备份失败即中止/半截安装可恢复/强制重装也还原/清理失败不假报)"
+        run: bash tests/test-install-bintxn.sh
+
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
 

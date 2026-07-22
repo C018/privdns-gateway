@@ -18,7 +18,7 @@ bad(){ echo "[FAIL] $1"; nfail=$((nfail+1)); }
 
 xt(){ sed -n "/^$1(){/,/^}/p" "$ROOT/deploy/bot/pdg.sh"; }
 eval "$(xt _core_bindir)"; eval "$(xt _core_config_check)"; eval "$(xt _core_kernel_stable)"
-eval "$(xt _core_restore_prev)"; eval "$(xt _core_swap_verify)"; eval "$(xt _pdg_apply_snapshot_tree)"
+eval "$(xt _pdg_sha)"; eval "$(xt _core_stash_kernel)"; eval "$(xt _core_restore_prev)"; eval "$(xt _core_swap_verify)"; eval "$(xt _pdg_apply_snapshot_tree)"
 
 c_g(){ echo "$*"; }; c_y(){ echo "$*"; }
 sleep(){ :; }
@@ -64,6 +64,46 @@ for svc in mihomo sing-box; do
     && grep -q '已装并重启' <<<"$out"; } \
     && ok "$svc: 全过 → 新核按 sha 就位 + .prev 已删 + 报已装并重启" \
     || bad "$svc C: rc=$rc sha=$(cursha "$svc") out=$out"
+done
+
+# ── E. 备份失败必须在装新内核之前中止(问题四) ────────────────────────────
+# 旧实现 `cp -a "$bin" "$prev"` 不看结果, 备份没成也照装新核 → 出事时无核可退。
+for svc in mihomo sing-box; do
+  setup "$svc" 0; NEW_ACTIVE=active
+  rc=0
+  out=$(cp(){ return 1; }                       # 注入: 备份拷不动
+        install(){ echo "INSTALL_RAN" >&2; command install "$@"; }
+        _core_swap_verify "$svc" "$WORK/new-$svc" "$BIN" vTEST 2>&1) || rc=$?
+  { [[ "$rc" != 0 ]] && ! grep -q INSTALL_RAN <<<"$out" && [[ "$(cursha "$svc")" == "$OLDSHA" ]]; } \
+    && ok "$svc: 备份失败 → 非0 且新内核 install 从未执行, 旧核原封不动" \
+    || bad "E($svc): rc=$rc out=$out"
+done
+
+# ── F. 历史遗留的 <svc>.prev 不得被当成"本次备份"还原回去 ──────────────────
+# 真正的危险: 备份 cp 失败时旧实现原地留下上次的 .prev, 还原那步会把这个**来源不明的
+# 历史文件** mv 成当前内核 —— 等于用一个谁也不知道是什么的二进制顶替了正在跑的内核。
+for svc in mihomo sing-box; do
+  setup "$svc" 3; NEW_ACTIVE=active
+  printf '#!/bin/sh\n# STALE-HISTORICAL-PREV\nexit 0\n' > "$BIN/$svc.prev"
+  rc=0
+  out=$(cp(){ return 1; }                      # 备份拷不动, 历史 .prev 原地不动
+        _core_swap_verify "$svc" "$WORK/new-$svc" "$BIN" vTEST 2>&1) || rc=$?
+  { [[ "$rc" != 0 ]] && ! grep -q STALE "$BIN/$svc" 2>/dev/null && [[ "$(cursha "$svc")" == "$OLDSHA" ]]; } \
+    && ok "$svc: 备份失败且存在历史 .prev → 不拿它顶替内核, 旧核原封不动" \
+    || bad "F($svc): rc=$rc 当前内核=$(sed -n 2p "$BIN/$svc" 2>/dev/null)"
+  rm -f "$BIN/$svc.prev"
+done
+
+# ── G. 还原时 mv 失败 → _core_restore_prev 必须返回非0(不能只凭服务 active 判成功) ──
+for svc in mihomo sing-box; do
+  setup "$svc" 0; NEW_ACTIVE=active
+  cp -a "$BIN/$svc" "$BIN/$svc.prev"           # 备份路径同时喂给新旧两种签名
+  rc=0
+  out=$(mv(){ return 1; }
+        _core_restore_prev "$svc" "$BIN" "$BIN/$svc.prev" "$OLDSHA" 2>&1) || rc=$?
+  [[ "$rc" != 0 ]] && ok "$svc: 还原 mv 失败 → _core_restore_prev 返回非0(服务 active 不算数)" \
+    || bad "G($svc): rc=$rc out=$out"
+  rm -f "$BIN/$svc.prev"
 done
 
 # ── D. 快照含内核二进制, 且回滚能按内容还原(网络无关) ──

@@ -94,6 +94,37 @@ rc=0; out=$(runx "--dir '$SNAP/A'") || rc=$?
   && ok "跨内核回滚: 内核激活失败 → 非0 + '未完全回滚' + 不报'✅ 已回滚'" || bad "C3: rc=$rc out=$out"
 grep -q '内核激活' <<<"$out" && ok "  未恢复项明确列出'内核激活'" || bad "C3b: 未列出失败项 out=$out"
 
+# ── C4. 校验快照旧配置要用**快照自带的内核**, 不能用当前(新)内核 ──────────────
+# 场景: 新内核拒绝旧配置(正是要回滚的原因)。若拿当前新内核去校验快照里的旧配置, 它当然
+# 说"不合法", 回滚就被自己挡住了 —— 旧内核和旧配置本该一起回去。
+mkmihomo_snap(){  # $1=目录名 $2=快照内核的 check 退出码
+  local d="$SNAP/$1"; rm -rf "$d"; mkdir -p "$d/tree/etc/privdns-gateway" "$d/tree/etc/mihomo" "$d/tree/usr/local/bin"
+  printf 'mihomo\n' > "$d/tree/etc/privdns-gateway/backend"
+  printf 'SNAP-M\n'  > "$d/tree/etc/privdns-gateway/snapid"
+  printf 'mixed-port: 7890\n' > "$d/tree/etc/mihomo/config.yaml"
+  printf '#!/bin/sh\nexit %s\n' "$2" > "$d/tree/usr/local/bin/mihomo"; chmod 755 "$d/tree/usr/local/bin/mihomo"
+  # 按 cmd_snapshot 的方式打**显式成员路径**: 递归打 usr 会带出 usr/ 目录项, 触发越界守卫
+  tar czf "$d/snap.tar.gz" -C "$d/tree" etc/privdns-gateway etc/mihomo usr/local/bin/mihomo 2>/dev/null
+  rm -rf "$d/tree"
+}
+# 当前内核一律拒绝旧配置(模拟"新内核不认旧配置")
+cat > "$WORK/curkernel.sh" <<'EOF'
+mihomo(){ return 1; }
+_pdg_core(){ echo mihomo; }
+_pdg_core_svc(){ echo mihomo; }
+EOF
+runm(){ bash -c "source '$WORK/harness.sh'; source '$WORK/curkernel.sh'; source '$WORK/rollback.sh'; cmd_rollback $1" 2>&1; }
+
+mkmihomo_snap M_OK 0            # 快照自带的 mihomo 接受旧配置
+rm -f "$WORK/applied_snapid"; rc=0; out=$(runm "--dir '$SNAP/M_OK'") || rc=$?
+{ [[ "$rc" == 0 ]] && [[ "$(cat "$WORK/applied_snapid" 2>/dev/null)" == SNAP-M ]]; } \
+  && ok "快照内核接受旧配置 → 回滚成功落盘(不被当前新内核挡住)" || bad "C4a: rc=$rc out=$out"
+
+mkmihomo_snap M_BAD 1           # 快照自带的 mihomo 也拒绝 → 这份快照真的不可用
+rm -f "$WORK/applied_snapid"; rc=0; out=$(runm "--dir '$SNAP/M_BAD'") || rc=$?
+{ [[ "$rc" != 0 ]] && [[ ! -e "$WORK/applied_snapid" ]]; } \
+  && ok "快照内核也拒绝旧配置 → 落盘前中止(不写坏现网)" || bad "C4b: rc=$rc applied=$(cat "$WORK/applied_snapid" 2>/dev/null)"
+
 # ── D. 静态断言: cmd_update / cmd_snapshot / 越界守卫 ─────────────────────────
 u="$ROOT/deploy/bot/pdg.sh"
 grep -q '更新前快照失败, 中止更新' "$u" && ok "cmd_update: 快照失败即中止(不在无法回滚下继续)" || bad "D1: 缺快照失败中止"

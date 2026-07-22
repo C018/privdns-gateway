@@ -54,7 +54,7 @@ assert "临时观测/控制面板" in install_doc and "临时观测/控制面板
     "install and production docs should document the temporary panel boundary"
 )
 
-rollback = block_after(pdg, "cmd_rollback()", window=4800)   # harden + core-aware + 跨内核 + --dir/--git 精确回滚后更大
+rollback = block_after(pdg, "cmd_rollback()", window=6200)   # harden + core-aware + 跨内核 + --dir/--git + 用快照自带内核校验旧配置后更大(实测约 5.7k)
 assert '[[ "$idx" =~ ^[0-9]+$ ]]' in rollback, "rollback index should reject non-numeric input"
 assert 'idx >= ${#snaps[@]}' in rollback, "rollback index should reject out-of-range input"
 

@@ -600,6 +600,14 @@ def check_mitm():
     enabled = [k for k in ("wloc",) if (cfg.get(k) or {}).get("enabled")]
     if not enabled:
         return ("info", "MITM 插件", "未启用")
+    # WLOC 开着就说明这几个组件是必需件: 更新时若某个装失败(旧实现 ||true 会静默跳过),
+    # 目标位置留着上一版文件 —— 光看"服务 active"发现不了新旧混装, 这里按文件在不在直接判死。
+    need = ["/opt/pdg-bot/mitm_ca.py", "/opt/pdg-bot/mitm_server.py", "/opt/pdg-bot/mitm_wloc.py",
+            "/opt/pdg-bot/probe81.py", "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"]
+    miss = [os.path.basename(p) for p in need if not os.path.isfile(p)]
+    if miss:
+        return ("fail", "MITM 插件", "已启用但缺 iOS 组件: " + ", ".join(miss)
+                + "; 运行 sudo pdg update 重新部署。")
     if _run(["systemctl", "is-active", "pdg-mitm"])[1].strip() != "active":
         return ("fail", "MITM 插件", "已启用(" + ",".join(enabled) + ")但 pdg-mitm 未运行")
     if not os.path.isfile("/etc/privdns-gateway/ca/ca.crt"):
