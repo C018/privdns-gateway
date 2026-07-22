@@ -137,6 +137,69 @@ def main():
     assert lvl == "warn", "平台标记缺失 → warn(不假装已确认 Android)"
     ok("checks.check_platform: 标记缺失 → 可见 warning(非静默回退)")
 
+    # ── 推测态: 标记是猜的, 不能当成已确认 ──────────────────────────────────
+    # v1.4.x 老装升上来必然落在这里(那会儿 probe81/描述文件装给了所有机器, 证明不了平台)。
+    with tempfile.TemporaryDirectory() as d:
+        pf = os.path.join(d, "platform")
+        open(pf, "w").write("android\n")
+        _pf, _gf = checks.PLATFORM_FILE, checks.PLATFORM_GUESSED
+        _hint = checks.platform_hint
+        checks.PLATFORM_FILE, checks.PLATFORM_GUESSED = pf, pf + ".guessed"
+        try:
+            checks.platform_hint = lambda: (None, "")
+            lvl, _, det = checks.check_platform()
+            assert (lvl, det) == ("ok", "android"), (lvl, det)
+            ok("checks.check_platform: 已确认的 android → ok")
+
+            open(pf + ".guessed", "w").close()
+            lvl, _, det = checks.check_platform()
+            assert lvl == "warn" and "推测" in det and "pdg platform ios" in det, (lvl, det)
+            assert "线索" not in det, "没有证据时不该编线索: " + det
+            ok("checks.check_platform: 推测态 → warn + 给出确认命令; 无证据则不提线索")
+
+            # 有可观测证据时把线索带出来(只提示, 绝不据此自动改标记)
+            checks.platform_hint = lambda: ("ios", "内核活动连接里有 x-courier.push.apple.com(iOS 系统级服务)")
+            lvl, _, det = checks.check_platform()
+            assert lvl == "warn" and "疑似 ios" in det and "push.apple.com" in det, det
+            assert open(pf).read().strip() == "android", "线索绝不能自动改写平台标记"
+            ok("checks.check_platform: 有 iOS 证据 → 带出线索『疑似 ios』, 但标记原样不动")
+        finally:
+            checks.PLATFORM_FILE, checks.PLATFORM_GUESSED = _pf, _gf
+            checks.platform_hint = _hint
+
+    # 线索识别本身: Apple/Google 的系统级长连接特征
+    _ch = checks._conn_hosts
+    try:
+        checks._conn_hosts = lambda: ["1-courier.push.apple.com", "www.example.com"]
+        assert checks.platform_hint()[0] == "ios"
+        checks._conn_hosts = lambda: ["mtalk.google.com"]
+        assert checks.platform_hint()[0] == "android"
+        checks._conn_hosts = lambda: ["www.example.com", "notapple.com"]
+        checks._gms_established = lambda: False
+        assert checks.platform_hint() == (None, ""), "无特征就该沉默, 不能瞎猜"
+        checks._gms_established = lambda: True
+        assert checks.platform_hint()[0] == "android", "GMS 5228 活动连接 = Android 强线索"
+    finally:
+        checks._conn_hosts = _ch
+    ok("checks.platform_hint: Apple/GMS 特征各自识别, 无特征时沉默")
+
+    # ── 推测态下的拒绝文案: 不能断言"本机是 Android" ────────────────────────
+    _ex = os.path.exists
+    try:
+        os.path.exists = lambda p: True if p.endswith("platform.guessed") else _ex(p)
+        bot._platform = lambda: "android"
+        note = bot._platform_unconfirmed()
+        assert "推测" in note and "pdg platform ios" in note, note
+        ok("bot: 推测态拒绝文案点明未确认并给出确认命令(iPhone 用户不会以为功能没了)")
+        bot._platform = lambda: "ios"
+        assert bot._platform_unconfirmed() == "", "iOS 上不该出现这条提示"
+        bot._platform = lambda: "android"
+        os.path.exists = _ex
+        assert bot._platform_unconfirmed() == "", "已确认的 android 不该出现这条提示"
+        ok("bot: 已确认平台(两侧)均不出现推测提示")
+    finally:
+        os.path.exists = _ex
+
     print(f"\n通过 {pass_n} 项断言")
 
 

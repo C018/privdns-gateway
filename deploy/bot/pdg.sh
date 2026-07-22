@@ -1102,7 +1102,18 @@ cmd_detect_cidr(){
 cmd_ios(){
   need_root ios
   # 平台门控: Android 直接拒绝 —— 不装 qrencode、不临时改 nft、不开 8443。
-  [[ "$(_pdg_platform)" == ios ]] || { echo "❌ iOS 描述文件仅 iOS 平台可用(本机为 Android)。Android 请在手机『私密 DNS』直接填 DoT 域名。"; return 1; }
+  if [[ "$(_pdg_platform)" != ios ]]; then
+    echo "❌ iOS 描述文件仅 iOS 平台可用(本机为 Android)。"
+    # 推测态下不能把"本机是 Android"当成事实说 —— 没人确认过。v1.4.x 升上来的 iPhone
+    # 机器正落在这里, 一句干巴巴的拒绝会让人以为功能没了, 其实只差一条确认命令。
+    if [[ -e /etc/privdns-gateway/platform.guessed ]]; then
+      echo "   ⚠️ 这个 android 是**推测**的(老装升级时无确凿证据), 没人确认过。"
+      echo "   若本网关服务的是 iPhone: sudo pdg platform ios   (确认后本功能立即可用)"
+    else
+      echo "   Android 请在手机『私密 DNS』直接填 DoT 域名。"
+    fi
+    return 1
+  fi
   local TMPL=/opt/pdg-bot/pdg-dot.mobileconfig.tmpl
   [[ -f "$TMPL" ]] || { echo "缺少 $TMPL, 先装好 PrivDNS Gateway"; return 1; }
   command -v qrencode >/dev/null || { c_g "装 qrencode…"; apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qrencode; }

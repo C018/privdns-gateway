@@ -9,6 +9,8 @@ DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
 BACKEND_MARKER = "/etc/privdns-gateway/backend"
 MIHOMO_CFG = "/etc/mihomo/config.yaml"
 NFT_CONF = "/etc/nftables.conf"
+PLATFORM_FILE = "/etc/privdns-gateway/platform"
+PLATFORM_GUESSED = PLATFORM_FILE + ".guessed"   # 存在 = 平台是推测出来的, 没人确认过
 REPO_DIR = "/opt/privdns-gateway"   # 已装仓库(比对部署文件是否与当前发布同版本)
 # 面板 UI 在 /etc/sing-box/ui/dist, 不在 mihomo 工作目录下 → SAFE_PATHS 放行, 否则 `mihomo -t` 拒。
 os.environ.setdefault("SAFE_PATHS", "/etc/sing-box/ui/dist")
@@ -29,7 +31,7 @@ def _core_svc():
 def _platform():
     """手机平台: ios / android(读不到默认 android)。用于跳过平台不相关的检查。"""
     try:
-        p = open("/etc/privdns-gateway/platform", encoding="utf-8").read().strip()
+        p = open(PLATFORM_FILE, encoding="utf-8").read().strip()
         if p in ("ios", "android"):
             return p
     except OSError:
@@ -83,19 +85,73 @@ def _dot_file():
     except Exception:  # noqa: BLE001
         return ""
 
+# ── 平台线索 ────────────────────────────────────────────────────────────────
+# 老装(v1.4.x)升上来时平台是**推测**的: 那会儿 probe81/描述文件模板装给了所有机器,
+# 它们的存在证明不了平台。但手机自己会说话 —— 两个系统各有一条**系统级长连接**,
+# 从网关这侧看得见, 手机待机也在:
+#   Android: GMS 推送 mtalk.google.com:5228(v1.4.x 装机就把 5228-5230 转进代理)
+#   iOS:     APNs / 定位 / 联网检测 → *.push.apple.com、gs-loc.apple.com、captive.apple.com
+# 只作**线索**提示, 绝不据此自动改标记 —— 猜错方向去做破坏性清理正是要避免的事。
+_APPLE_HOSTS   = ("push.apple.com", "gs-loc.apple.com", "captive.apple.com", "gsp-ssl.ls.apple.com")
+_ANDROID_HOSTS = ("mtalk.google.com", "connectivitycheck.gstatic.com", "android.clients.google.com")
+
+def _conn_hosts():
+    """内核活动连接的目标主机名(clash_api /connections)。读不到就返回 [] —— 没线索不影响判定。"""
+    try:
+        req = urllib.request.Request("http://127.0.0.1:9090/connections")
+        try:                                        # 面板开启时设了 secret, 本机调用也要带 Bearer
+            sec = (json.load(open(SB)).get("experimental", {}).get("clash_api", {}) or {}).get("secret") or ""
+        except Exception:  # noqa: BLE001
+            sec = ""
+        if sec:
+            req.add_header("Authorization", "Bearer " + sec)
+        with urllib.request.urlopen(req, timeout=3) as r:
+            data = json.load(r)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for c in (data.get("connections") or []):
+        h = ((c.get("metadata") or {}).get("host") or "").strip().lower()
+        if h:
+            out.append(h)
+    return out
+
+def _gms_established():
+    """GMS 推送端口(5228-5230)上有没有活动连接。iPhone 不用 GMS, 这是 Android 的强线索。
+    转发两侧都算数: 手机→网关那条被 REDIRECT 后本地口是 5228, 网关→Google 那条对端口是 5228。"""
+    rc, out, _ = _run(["ss", "-Htn", "state", "established"], t=5)
+    if rc != 0:
+        return False
+    return bool(re.search(r":(?:5228|5229|5230)\b", out))
+
+def platform_hint():
+    """按可观测证据给平台线索: (ios|android, 说明) 或 (None, "")。只读; 拿不到证据就沉默。"""
+    hosts = _conn_hosts()
+    for h in hosts:
+        if any(h == d or h.endswith("." + d) for d in _APPLE_HOSTS):
+            return ("ios", "内核活动连接里有 %s(iOS 系统级服务)" % h)
+    for h in hosts:
+        if any(h == d or h.endswith("." + d) for d in _ANDROID_HOSTS):
+            return ("android", "内核活动连接里有 %s(Android 系统级服务)" % h)
+    if _gms_established():
+        return ("android", "有 GMS 推送端口 5228-5230 上的活动连接(iPhone 不用 GMS)")
+    return (None, "")
+
 def check_platform():
     """平台标记(/etc/privdns-gateway/platform)是否明确。缺失/非法 → warn: 当前按 Android 安全回退,
     但这不是已确认的 Android; 跑一次 sudo pdg(触发 migrate_platform_marker)即可落定。"""
     try:
-        p = open("/etc/privdns-gateway/platform", encoding="utf-8").read().strip()
+        p = open(PLATFORM_FILE, encoding="utf-8").read().strip()
     except OSError:
         p = ""
     if p in ("ios", "android"):
         # 标记是"推测"出来的(老装无平台概念, 且机器上的 iOS 组件证明不了平台): 持续提示到人工确认。
         # 推测状态下破坏性的平台清理一律不做, 免得把真 iPhone 部署的 iOS 组件删掉。
-        if os.path.exists("/etc/privdns-gateway/platform.guessed"):
-            return ("warn", "平台", p + "(**推测**, 未确认) → 平台相关清理暂缓; "
-                    "确认后运行: sudo pdg platform ios  或  sudo pdg platform android")
+        if os.path.exists(PLATFORM_GUESSED):
+            g, why = platform_hint()
+            tip = ("; 线索: %s → 疑似 %s" % (why, g)) if g else ""
+            return ("warn", "平台", p + "(**推测**, 未确认) → 平台相关清理暂缓" + tip +
+                    "; 确认后运行: sudo pdg platform ios  或  sudo pdg platform android")
         return ("ok", "平台", p)
     return ("warn", "平台", "平台标记缺失/非法 → 当前按 Android 安全回退(非已确认); 运行 sudo pdg 触发迁移落定")
 

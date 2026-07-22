@@ -375,13 +375,22 @@ def _platform():
         pass
     return "android"
 
+def _platform_unconfirmed():
+    """平台标记是**推测**出来的(老装 v1.4.x 升上来且没有确凿证据)时的补充说明。
+    推测态下不能断言"本机为 Android" —— 没人确认过。v1.4.2 的 iPhone 用户升级后落到这里,
+    看到一句干巴巴的"仅 iOS 可用(本机为 Android)"会以为描述文件功能没了, 而其实只差一条确认命令。"""
+    if _platform() != "ios" and os.path.exists("/etc/privdns-gateway/platform.guessed"):
+        return ("\n⚠️ 这个 android 是**推测**的(老装升级时无确凿证据), 没人确认过。"
+                "\n若本网关服务的是 iPhone, 在服务器执行 sudo pdg platform ios 即可恢复 iOS 功能。")
+    return ""
+
 def _ios_only(chat, mid=None):
     """iOS 专属功能的**后端硬门控**(不只隐藏按钮 —— 旧 TG 消息里的按钮/命令被点也会被拒)。
     iOS → True; 否则清 state + 回一条拒绝消息, 返回 False。callback 传 mid, 文本/命令不传。"""
     if _platform() == "ios":
         return True
     state.pop(chat, None)
-    msg = "此功能仅 iOS 平台可用(本机为 Android)。"
+    msg = "此功能仅 iOS 平台可用(本机为 Android)。" + _platform_unconfirmed()
     if mid is not None:
         edit(chat, mid, msg, MENU)
     else:
@@ -2355,7 +2364,7 @@ def _ios_profile(ssids=()):
     WLOC(MITM 插件)启用时附上根 CA payload, 让设备信任本网关 CA(先开 WLOC 再重新生成即含 CA)。
     用 plistlib 插入, SSID 含 &<> 等也不会破 XML。"""
     if _platform() != "ios":         # 最底层门控: 即便某路径绕过按钮/回调, 也生成不了 iOS 描述文件
-        raise RuntimeError("iOS 描述文件仅 iOS 平台可用(本机为 Android)。")
+        raise RuntimeError("iOS 描述文件仅 iOS 平台可用(本机为 Android)。" + _platform_unconfirmed())
     if not os.path.exists(IOS_TMPL):
         raise FileNotFoundError("缺少模板 " + IOS_TMPL)
     t = open(IOS_TMPL).read()
@@ -3123,7 +3132,7 @@ def handle_text(chat, text, mid=None):
         send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act == "ios_ssid":
         if _platform() != "ios":         # 已清 state(act 用 pop 取出); Android 直接拒绝, 不生成文件
-            send_plain(chat, "此功能仅 iOS 平台可用(本机为 Android)。"); return
+            send_plain(chat, "此功能仅 iOS 平台可用(本机为 Android)。" + _platform_unconfirmed()); return
         ssids = [] if text.strip() == "-" else [l.strip()[:32] for l in text.splitlines() if l.strip()][:8]
         try:
             send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(ssids),
