@@ -473,8 +473,26 @@ migrate_singbox_gms(){
   local f="${1:-/etc/sing-box/config.json}"
   [[ "$(_pdg_platform 2>/dev/null)" == ios ]] && return 0     # GMS/FCM 仅 Android; iOS 走 APNs, 不补
   [[ -f "$f" ]] || return 0
-  grep -q '"listen_port": 5228' "$f" && return 0              # 已有 → 幂等退出
-  grep -q '"sniff_override_destination"' "$f" || return 0     # 不是本项目形态的配置 → 不动
+  # 幂等/形态判定走 JSON 解析, 不靠文本格式 —— 用 grep 认 `"listen_port": 5228` 会被紧凑
+  # JSON(冒号后无空格)骗过, 于是重复插入三条同端口入站; 虽有 check/重启兜底能还原, 但那是
+  # 事后补救, 判据本身不该依赖别人怎么格式化这份 JSON。
+  local _gmsst
+  _gmsst=$(python3 - "$f" <<'GMSPY'
+import json, sys
+try:
+    c = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("skip"); raise SystemExit(0)
+ins = c.get("inbounds") or []
+if not any(i.get("sniff_override_destination") for i in ins):
+    print("skip")                                            # 不是本项目形态的配置 → 不动
+elif any(i.get("listen_port") in (5228, 5229, 5230) for i in ins):
+    print("have")                                            # 已有 → 幂等退出
+else:
+    print("need")
+GMSPY
+  ) || _gmsst=skip
+  [[ "$_gmsst" == need ]] || return 0
   command -v sing-box >/dev/null || return 0
   c_g "检测到 sing-box 缺 GMS 推送入站 → 补 5228-5230 嗅探入站…"
   local bak; bak="$f.pregms.$(date +%s)"
@@ -1478,8 +1496,29 @@ migrate_mosdns_hijack_shape(){
   fi
 }
 
+# 老装(v1.4.x)从来没有 backend 标记 —— 内核判定一直靠 _pdg_core 的默认值 singbox 兜底。
+# 这是隐式状态: 默认值将来一改(比如默认转 mihomo), 这些机器会在某次更新后**静默换核**,
+# 而它们上面可能根本没装那个内核, 随后 doctor 判失败、更新回滚, 直接卡死升不上去。
+# 据现场证据把标记落地(unit 文件存在才算数, 免得 is-active 的异常输出误导)。
+migrate_backend_marker(){
+  local bm=/etc/privdns-gateway/backend cur core=""
+  cur="$(cat "$bm" 2>/dev/null)"
+  [[ "$cur" == mihomo || "$cur" == singbox ]] && return 0       # 已有合法标记 → 幂等
+  local u_m=/etc/systemd/system/mihomo.service u_s=/etc/systemd/system/sing-box.service
+  if   [[ -e "$u_m" ]] && [[ "$(systemctl is-active mihomo   2>/dev/null)" == active ]]; then core=mihomo
+  elif [[ -e "$u_s" ]] && [[ "$(systemctl is-active sing-box 2>/dev/null)" == active ]]; then core=singbox
+  elif [[ -e "$u_m" ]] && systemctl is-enabled mihomo   >/dev/null 2>&1; then core=mihomo
+  elif [[ -e "$u_s" ]] && systemctl is-enabled sing-box >/dev/null 2>&1; then core=singbox
+  elif [[ -f /etc/mihomo/config.yaml ]] && command -v mihomo >/dev/null 2>&1; then core=mihomo
+  else core=singbox; fi                                          # 兜底与历史默认一致, 不改变现有行为
+  install -d -m700 /etc/privdns-gateway 2>/dev/null || true
+  printf '%s\n' "$core" > "$bm" \
+    && c_g "  补内核标记: $core(据现场证据; 老装此前一直靠默认值兜底)。"
+}
+
 run_all_migrations(){
   migrate_platform_marker || true          # 先统一平台判定源(后续平台相关迁移据此走)
+  migrate_backend_marker || true           # 再把内核标记落地(别再靠默认值兜底)
   migrate_botenv || true; migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true
   migrate_mosdns_unlock || true; migrate_singbox_gms || true; migrate_fw_gms || true
   migrate_mosdns_ratelimit || true; migrate_lowmem || true; migrate_mihomo_safepaths || true

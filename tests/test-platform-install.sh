@@ -67,6 +67,44 @@ out=$(PDG_PLATFORM_FILE="$WORK/platform" migrate_android_cleanup 2>&1)
 grep -q '跳过 iOS 组件清理' <<<"$out" && bad "A2d: 已确认仍跳过清理" || ok "确认后的 android → 正常执行清理"
 c_y(){ :; }                # 恢复静默, 不干扰后续用例
 
+# ── A3. migrate_backend_marker: 老装(v1.4.x)从无 backend 标记, 必须据现场证据落地 ──
+# 隐患: 一直靠 _pdg_core 的默认值 singbox 兜底; 默认值将来一改就会静默换核, 而机器上
+# 可能根本没装那个内核。抽真身 + 绝对路径重定向到沙箱(不给生产代码加接缝)。
+BM="$WORK/bm"; mkdir -p "$BM/etc/privdns-gateway" "$BM/etc/systemd/system" "$BM/etc/mihomo"
+xt migrate_backend_marker | sed -e "s#/etc/#$BM/etc/#g" > "$WORK/bmfn.sh"
+bm_run(){ # $1=额外桩
+  rm -f "$BM/etc/privdns-gateway/backend"
+  bash -c "set -uo pipefail
+c_g(){ echo \"\$*\"; }; c_y(){ :; }
+install(){ command install \"\$@\"; }
+$1
+source '$WORK/bmfn.sh'
+migrate_backend_marker >/dev/null 2>&1
+cat '$BM/etc/privdns-gateway/backend' 2>/dev/null || echo '(无)'"
+}
+rm -f "$BM/etc/systemd/system/"*.service "$BM/etc/mihomo/config.yaml"
+[[ "$(bm_run 'systemctl(){ echo inactive; return 1; }')" == singbox ]] \
+  && ok "backend: 无任何证据 → 兜底 singbox(与历史默认一致)" || bad "A3a"
+
+: > "$BM/etc/systemd/system/mihomo.service"
+[[ "$(bm_run 'systemctl(){ [[ "$1" == is-active ]] && echo active; return 0; }')" == mihomo ]] \
+  && ok "backend: mihomo unit 存在且 active → mihomo" || bad "A3b"
+
+rm -f "$BM/etc/systemd/system/mihomo.service"; : > "$BM/etc/systemd/system/sing-box.service"
+[[ "$(bm_run 'systemctl(){ [[ "$1" == is-active ]] && echo active; return 0; }')" == singbox ]] \
+  && ok "backend: sing-box unit 存在且 active → singbox" || bad "A3c"
+
+# unit 文件不存在时, is-active 谎报 active 也不能被采信(正是加 unit 存在性前置的原因)
+rm -f "$BM/etc/systemd/system/"*.service
+[[ "$(bm_run 'systemctl(){ [[ "$1" == is-active ]] && echo active; return 0; }')" == singbox ]] \
+  && ok "backend: unit 不存在时不轻信 is-active(不误判成 mihomo)" || bad "A3d"
+
+# 已有合法标记 → 幂等不改
+printf 'mihomo\n' > "$BM/etc/privdns-gateway/backend"
+out=$(bash -c "c_g(){ :; }; c_y(){ :; }; install(){ :; }; systemctl(){ echo active; }
+source '$WORK/bmfn.sh'; migrate_backend_marker; cat '$BM/etc/privdns-gateway/backend'" 2>/dev/null)
+[[ "$out" == mihomo ]] && ok "backend: 已有合法标记 → 幂等不改" || bad "A3e: $out"
+
 # ── B. GMS 迁移仅 Android(iOS 跳过)──────────────────────────────────────────
 eval "$(xt migrate_singbox_gms)"; eval "$(xt migrate_fw_gms)"
 sing-box(){ return 0; }; systemctl(){ [[ "$1" == is-active ]] && echo active; return 0; }; nft(){ return 0; }
